@@ -78,6 +78,9 @@ M.marked = {}
 M.base_blob = {}
 
 local ns = vim.api.nvim_create_namespace("review_comments")
+-- Invisible extmarks that anchor drafts to their text while a buffer is loaded,
+-- so a draft's line follows local edits (see sync_draft_positions).
+local ns_drafts = vim.api.nvim_create_namespace("review_draft_anchors")
 
 --- Normalize a value decoded from gh JSON: JSON null arrives as vim.NIL (a
 --- truthy userdata, not nil), so `x or fallback` never falls through without
@@ -260,10 +263,16 @@ local function state_dir()
   return dir
 end
 
+-- The state filename for a repo. Dots are escaped along with the path
+-- separators so the ".drafts" suffix is unambiguous: without this, triage's
+-- suffix-less file for a repo literally named "/a/b.drafts" would collide with
+-- our drafts file for "/a/b". (triage.nvim escapes identically and uses a
+-- ".triage" suffix — kept in sync by convention, not by a shared module, so the
+-- plugins stay separable.)
 ---@param root string
 ---@return string
 local function drafts_file(root)
-  local key = root:gsub("[/\\:]", "%%")
+  local key = root:gsub("[/\\:.]", "%%")
   return state_dir() .. "/" .. key .. ".drafts"
 end
 
@@ -272,7 +281,14 @@ end
 local function load_drafts(root)
   local path = drafts_file(root)
   if vim.fn.filereadable(path) == 0 then
-    return {}
+    -- Fall back to the pre-dot-escaping filename so existing drafts survive
+    -- the rename; the next save writes the new path.
+    local legacy = state_dir() .. "/" .. root:gsub("[/\\:]", "%%") .. ".drafts"
+    if legacy ~= path and vim.fn.filereadable(legacy) == 1 then
+      path = legacy
+    else
+      return {}
+    end
   end
   local ok, data = pcall(vim.json.decode, table.concat(vim.fn.readfile(path), "\n"))
   if not ok or type(data) ~= "table" then
@@ -291,7 +307,17 @@ local function save_drafts(root)
     end
     return
   end
-  vim.fn.writefile({ vim.json.encode(M.drafts) }, path)
+  -- Serialize without runtime-only fields (the "_mark" extmark id is only
+  -- meaningful while its buffer is loaded in this session).
+  local clean = {}
+  for rel, list in pairs(M.drafts) do
+    clean[rel] = {}
+    for i, d in ipairs(list) do
+      clean[rel][i] =
+        { line = d.line, side = d.side, start_line = d.start_line, body = d.body }
+    end
+  end
+  vim.fn.writefile({ vim.json.encode(clean) }, path)
 end
 
 --- Ensure M.drafts is the on-disk draft set for `root` (reloads on repo change).
@@ -487,30 +513,6 @@ local function author_chunks(login)
   return { { "@" .. login, "ReviewCommentAuthor" } }
 end
 
---- The cached comments anchored at the current cursor line (a thread), with the
---- context needed to act on them. Returns (thread, rel, root) or nil.
----@return table[]?, string?, string?
-local function thread_at_cursor()
-  local root = current_root()
-  if not root then
-    return nil
-  end
-  local rel = rel_of(vim.api.nvim_get_current_buf(), root)
-  if not rel then
-    return nil
-  end
-  local line = vim.fn.line(".")
-  local thread = {}
-  for _, c in ipairs(M.by_path[rel] or {}) do
-    -- Match the rendered anchor: an outdated comment (line nulled) shows on
-    -- original_line, so act on it there too. Skip comments hidden by a toggle.
-    if comment_visible(c) and (val(c.line) or val(c.original_line)) == line then
-      thread[#thread + 1] = c
-    end
-  end
-  return thread, rel, root
-end
-
 --- A scratch float to compose text. Calls on_submit(body, close) on <C-s>.
 --- `initial` prefills it (and skips insert mode, e.g. when editing). By default
 --- an empty body cancels (closes without submitting); `allow_empty` lets an
@@ -532,7 +534,7 @@ local function open_input(title, initial, on_submit, allow_empty)
     relative = "editor",
     width = width,
     height = 8,
-    row = vim.o.lines - 11,
+    row = math.max(0, vim.o.lines - 11), -- clamp: keeps the float on short screens
     col = math.floor((vim.o.columns - width) / 2),
     border = "rounded",
     title = (" %s  ·  <C-s> send  ·  q cancel "):format(title),
@@ -594,6 +596,56 @@ local function wrap_text(text)
   return lines
 end
 
+--- Keep drafts anchored to their text while the buffer is edited. Live comments
+--- remap through a diff against their base blob, but a draft has no base commit
+--- — its line is wherever the user dropped it — so each draft gets an invisible
+--- extmark the first time its buffer renders, and every subsequent render reads
+--- the extmark back: Neovim moves extmarks with the text, so inserting or
+--- deleting lines above a draft updates d.line (and start_line by the same
+--- shift) instead of leaving it pointing at the wrong code. The moved position
+--- is persisted (drafts survive sessions; a stale saved line would silently
+--- misplace the comment on submit).
+---@param buf integer
+---@param rel string
+---@param root string
+local function sync_draft_positions(buf, rel, root)
+  local drafts = M.drafts[rel]
+  if not drafts or #drafts == 0 then
+    return
+  end
+  local last = vim.api.nvim_buf_line_count(buf)
+  local moved = false
+  for _, d in ipairs(drafts) do
+    if d._mark then
+      local pos = vim.api.nvim_buf_get_extmark_by_id(buf, ns_drafts, d._mark, {})
+      if pos[1] then
+        local line = pos[1] + 1
+        if line ~= d.line then
+          if d.start_line then
+            d.start_line = math.max(1, d.start_line + (line - d.line))
+          end
+          d.line = line
+          moved = true
+        end
+      else
+        d._mark = nil -- extmark gone (buffer reloaded); re-anchor below
+      end
+    end
+    if not d._mark then
+      d._mark = vim.api.nvim_buf_set_extmark(
+        buf,
+        ns_drafts,
+        math.min(d.line, last) - 1,
+        0,
+        {}
+      )
+    end
+  end
+  if moved then
+    save_drafts(root)
+  end
+end
+
 --- Group a buffer's comments and drafts by the row they render on: the
 --- anchor->entries map keying render_buf's draw and comment navigation, so
 --- markers and jumps agree on every position. Live comments are remapped from
@@ -608,6 +660,9 @@ local function buf_by_line(buf)
   local rel = rel_of(buf, M.root)
   if not rel then
     return nil
+  end
+  if M.drafts_root == M.root then
+    sync_draft_positions(buf, rel, M.root)
   end
   local live = M.by_path[rel]
   local drafts = M.drafts_root == M.root and M.drafts[rel] or nil
@@ -673,6 +728,39 @@ local function buf_by_line(buf)
     add(d.line, { kind = "draft", d = d })
   end
   return by_line
+end
+
+--- The live comments rendered on the current cursor line (a thread), with the
+--- context needed to act on them. Goes through buf_by_line — the same grouping
+--- and working-copy remap render_buf draws from — so acting on a comment always
+--- targets the one visibly under the cursor, even after local edits have moved
+--- its marker away from GitHub's raw line number. Returns (thread, rel, root)
+--- or nil.
+---@return table[]?, string?, string?
+local function thread_at_cursor()
+  local root = current_root()
+  if not root then
+    return nil
+  end
+  local buf = vim.api.nvim_get_current_buf()
+  local rel = rel_of(buf, root)
+  if not rel then
+    return nil
+  end
+  local line = vim.fn.line(".")
+  local last = vim.api.nvim_buf_line_count(buf)
+  local thread = {}
+  for anchor, entries in pairs(buf_by_line(buf) or {}) do
+    -- Mirror render_buf's clamp so an anchor drawn at the buffer edge matches.
+    if math.max(1, math.min(anchor, last)) == line then
+      for _, entry in ipairs(entries) do
+        if entry.kind == "live" then
+          thread[#thread + 1] = entry.c
+        end
+      end
+    end
+  end
+  return thread, rel, root
 end
 
 --- Draw the cached comments and drafts for one buffer (no network). Clears
@@ -781,9 +869,17 @@ local function fetch_render()
     ensure_drafts(root)
     local pr = resolve_pr(root)
     if pr then
-      -- 100 covers all but the busiest PRs; page beyond that only if it bites.
+      -- --paginate follows the Link headers so busy PRs aren't capped at one
+      -- page; --slurp wraps the pages as an array of arrays, flattened below.
       local endpoint = ("repos/:owner/:repo/pulls/%d/comments?per_page=100"):format(pr.number)
-      local comments, err = gh_json({ "api", endpoint }, root)
+      local pages, err = gh_json({ "api", "--paginate", "--slurp", endpoint }, root)
+      local comments
+      if pages then
+        comments = {}
+        for _, page in ipairs(pages) do
+          vim.list_extend(comments, page)
+        end
+      end
       if not comments then
         vim.notify("review: couldn't fetch comments: " .. tostring(err), vim.log.levels.WARN)
         M.by_path = {}
@@ -802,28 +898,32 @@ local function fetch_render()
         end
         M.by_path = by_path
         fetch_base_blobs(root)
-        if #comments >= 100 then
-          vim.notify("review: showing the first 100 PR comments", vim.log.levels.WARN)
-        end
       end
     else
       M.by_path = {} -- no PR for this branch: only drafts show
     end
 
+    -- Render now with whatever author names are already cached — the lookups
+    -- below are one gh round-trip per new commenter, and comments shouldn't
+    -- wait on them.
+    M.rebuild_marked(root)
+    render_all()
+
     -- Resolve display names for every commenter (cached per session), so the
-    -- inline headers read "Name - @login" rather than a bare handle.
+    -- inline headers read "Name - @login" rather than a bare handle; redraw
+    -- only if the lookups actually learned something new.
     local logins = {}
     for _, list in pairs(M.by_path) do
       for _, c in ipairs(list) do
-        if c.user and c.user.login then
+        if c.user and c.user.login and M.names[c.user.login] == nil then
           logins[c.user.login] = true
         end
       end
     end
-    resolve_names(root, logins)
-
-    M.rebuild_marked(root)
-    render_all()
+    if next(logins) then
+      resolve_names(root, logins)
+      render_all()
+    end
   end)
 end
 
@@ -1019,6 +1119,11 @@ function M.edit()
   end
   local line = vim.fn.line(".")
 
+  -- Resolve the live thread first: thread_at_cursor matches the *rendered*
+  -- (remapped) anchors, and its buf_by_line pass also syncs draft positions so
+  -- the d.line matching below sees up-to-date lines.
+  local live_thread = thread_at_cursor() or {}
+
   local draft_hits = {}
   for _, d in ipairs(M.drafts[rel] or {}) do
     if d.line == line then
@@ -1075,13 +1180,8 @@ function M.edit()
       items[#items + 1] =
         { kind = "draft", d = d, label = "[draft] " .. (d.body:gsub("%s+", " ")):sub(1, 50) }
     end
-    for _, c in ipairs(M.by_path[rel] or {}) do
-      if
-        comment_visible(c)
-        and (val(c.line) or val(c.original_line)) == line
-        and login
-        and c.user.login == login
-      then
+    for _, c in ipairs(live_thread) do
+      if login and c.user.login == login then
         items[#items + 1] = {
           kind = "live",
           c = c,
