@@ -1286,6 +1286,41 @@ local function fold_offdiff(offdiff)
   return table.concat(parts, "\n\n---\n\n")
 end
 
+--- Copy every drafted comment to a register, formatted as `path:line` followed
+--- by the body — the same shape M.submit folds off-diff drafts into, since both
+--- are "read this comment without GitHub's line-anchoring". Handy for pasting a
+--- whole pass into a PR description, a chat, or another tool entirely. Sorted by
+--- path then line so the order is stable across sessions. No-ops (with a notify)
+--- when there's nothing drafted. Register defaults to "+" (system clipboard);
+--- override via opts.yank_register.
+function M.yank_drafts()
+  local root = current_root()
+  if root then
+    ensure_drafts(root)
+  end
+
+  local entries = {}
+  for rel, list in pairs(M.drafts) do
+    for _, d in ipairs(list) do
+      entries[#entries + 1] = { path = rel, line = d.line, body = d.body }
+    end
+  end
+  if #entries == 0 then
+    vim.notify("review: no drafted comments to yank", vim.log.levels.INFO)
+    return
+  end
+  table.sort(entries, function(a, b)
+    if a.path ~= b.path then
+      return a.path < b.path
+    end
+    return a.line < b.line
+  end)
+
+  local reg = (M.opts.yank_register and M.opts.yank_register ~= "") and M.opts.yank_register or "+"
+  vim.fn.setreg(reg, fold_offdiff(entries))
+  vim.notify(("review: yanked %d drafted comment(s) to register %q"):format(#entries, reg))
+end
+
 function M.submit()
   local root = current_root()
   if not root then
@@ -1570,16 +1605,18 @@ local default_keys = {
   edit = "<leader>re",
   discard = "<leader>rx",
   submit = "<leader>rS",
+  yank = "<leader>ry",
   refresh = "<leader>rC",
   outdated = "<leader>ro",
   resolved = "<leader>rs",
 }
 
 --- Configure nitpick.nvim.
----@param opts? { verdict?: fun(): ("APPROVE"|"REQUEST_CHANGES"|"COMMENT"|nil), keys?: table<string, string|false> }
----   verdict  status source for submit's review event; nil prompts via a picker.
----            Wire it to triage.nvim's verdict to infer the event from triage.
----   keys     per-action left-hand side; see default_keys. false/"" disables one.
+---@param opts? { verdict?: fun(): ("APPROVE"|"REQUEST_CHANGES"|"COMMENT"|nil), keys?: table<string, string|false>, yank_register?: string }
+---   verdict        status source for submit's review event; nil prompts via a picker.
+---                  Wire it to triage.nvim's verdict to infer the event from triage.
+---   keys           per-action left-hand side; see default_keys. false/"" disables one.
+---   yank_register  register M.yank_drafts writes to; defaults to "+" (system clipboard).
 function M.setup(opts)
   M.opts = opts or {}
   local function set_hl()
@@ -1654,6 +1691,7 @@ function M.setup(opts)
   mapk("edit", "n", M.edit, "Review: edit PR comment/draft on line")
   mapk("discard", "n", M.discard_draft, "Review: discard draft on line")
   mapk("submit", "n", M.submit, "Review: submit drafted review (batched)")
+  mapk("yank", "n", M.yank_drafts, "Review: yank all drafted comments to a register")
   mapk("refresh", "n", M.refresh, "Review: refresh PR comments")
   mapk("outdated", "n", M.toggle_outdated, "Review: toggle outdated comments")
   mapk("resolved", "n", M.toggle_resolved, "Review: toggle resolved comments")
@@ -1691,6 +1729,11 @@ function M.setup(opts)
     "ReviewSubmit",
     M.submit,
     { desc = "Submit the drafted review to the PR" }
+  )
+  vim.api.nvim_create_user_command(
+    "ReviewYankDrafts",
+    M.yank_drafts,
+    { desc = "Yank all drafted comments to a register" }
   )
   vim.api.nvim_create_user_command(
     "ReviewCommentsRefresh",
