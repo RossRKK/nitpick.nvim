@@ -37,6 +37,15 @@
 -- changed or vanished locally can't be tracked, so it renders near the new hunk
 -- and is tagged "drifted". See remap_line / M.base_blob.
 --
+-- Submitting runs that remap in reverse. A review's line numbers are read
+-- against the commit it names, and the commit you're actually reading is your
+-- local HEAD — not the PR head, which may have moved on since you checked out —
+-- so submit anchors to HEAD (when GitHub knows it as a commit of the PR) and
+-- maps every drafted line back from the working copy to HEAD's copy of the file
+-- first. A drafted line with no counterpart there (text that only exists
+-- locally) can't be a line comment, so it folds into the review summary rather
+-- than landing on unrelated code. See resolve_commit / commit_line_mapper.
+--
 -- The PR is found from the active branch: none -> stay quiet; one -> use it;
 -- several -> ask once (remembered per branch). Rendering reads a cache, so only
 -- an explicit refresh or turning review mode on hits the network.
@@ -375,20 +384,26 @@ end
 
 -- ---------------------------------------------------------------------------
 
---- The open PR for the branch checked out in `root`. Returns {number, head} or
---- nil (no PR, or the user dismissed the picker). Prompts once when a branch has
---- several open PRs and remembers the choice.
+--- The open PR for the branch checked out in `root`. Returns {number, head, base}
+--- or nil (no PR, or the user dismissed the picker). Prompts once when a branch
+--- has several open PRs and remembers the choice.
 ---@param root string
----@return { number: integer, head: string }?
+---@return { number: integer, head: string, base: string }?
 local function resolve_pr(root)
   local branch = vim.trim(sh({ "git", "-C", root, "branch", "--show-current" }).stdout or "")
   if branch == "" then
     return nil
   end
-  local prs = gh_json(
-    { "pr", "list", "--head", branch, "--state", "open", "--json", "number,headRefOid,title" },
-    root
-  )
+  local prs = gh_json({
+    "pr",
+    "list",
+    "--head",
+    branch,
+    "--state",
+    "open",
+    "--json",
+    "number,headRefOid,baseRefOid,title",
+  }, root)
   if not prs or #prs == 0 then
     return nil
   end
@@ -415,7 +430,7 @@ local function resolve_pr(root)
     chosen = prs[idx]
     M.pr_choice = { branch = branch, number = chosen.number }
   end
-  return { number = chosen.number, head = chosen.headRefOid }
+  return { number = chosen.number, head = chosen.headRefOid, base = chosen.baseRefOid }
 end
 
 --- Join the branch PR's review threads (GraphQL) back onto the REST comments,
@@ -570,30 +585,120 @@ end
 -- Column width to soft-wrap inline comment bodies to. virt_lines don't wrap on
 -- their own, so long lines (e.g. a bare URL) would run off the right edge.
 local WRAP_WIDTH = 80
+-- Tab stop for expanding tabs in a comment body. virt_text draws a tab as a
+-- single cell, so tabs become spaces on this grid before anything is measured
+-- or wrapped — otherwise tab-indented code would render with its indentation
+-- silently flattened.
+local TAB_WIDTH = 4
 
---- Soft-wrap `text` to WRAP_WIDTH columns, breaking on spaces and hard-breaking
---- any token longer than the width (e.g. a bare URL). Empty input -> {""}.
---- Counts bytes, so wide multibyte text wraps a touch early — fine for prose.
+--- Expand tabs to spaces on the TAB_WIDTH grid. Counts bytes, like wrap_text,
+--- so a tab after multibyte text lands a touch early.
 ---@param text string
----@return string[]
-local function wrap_text(text)
-  local lines, cur = {}, ""
-  for word in text:gmatch("%S+") do
-    while #word > WRAP_WIDTH do -- token too long to ever fit: bite off a chunk
-      if cur ~= "" then
-        lines[#lines + 1], cur = cur, ""
-      end
-      lines[#lines + 1], word = word:sub(1, WRAP_WIDTH), word:sub(WRAP_WIDTH + 1)
-    end
-    local sep = cur == "" and "" or " "
-    if #cur + #sep + #word > WRAP_WIDTH then
-      lines[#lines + 1], cur = cur, word
+---@return string
+local function expand_tabs(text)
+  if not text:find("\t", 1, true) then
+    return text
+  end
+  local out, col = {}, 0
+  for ch in text:gmatch(".") do
+    if ch == "\t" then
+      local pad = TAB_WIDTH - (col % TAB_WIDTH)
+      out[#out + 1], col = string.rep(" ", pad), col + pad
     else
-      cur = cur .. sep .. word
+      out[#out + 1], col = ch, col + 1
     end
   end
-  lines[#lines + 1] = cur
+  return table.concat(out)
+end
+
+--- Soft-wrap one line of a comment body to WRAP_WIDTH columns. Whitespace is
+--- preserved: a line that fits comes back as it was (bar tab expansion and
+--- trailing blanks), so the indentation and column alignment of a pasted code
+--- snippet survive — collapsing runs of spaces is what used to make code in a
+--- comment unreadable. A longer line wraps at a space run, with continuation
+--- lines carrying the original indent so a wrapped list item or code line still
+--- reads as one block; a token too long to ever fit (e.g. a bare URL) is
+--- hard-broken. `verbatim` (a line inside a code fence) skips reflowing
+--- entirely: the text is only chopped at the width, every character in place.
+--- Empty input -> {""}.
+--- Counts bytes, so wide multibyte text wraps a touch early — fine for prose.
+---@param text string
+---@param verbatim boolean?
+---@return string[]
+function M.wrap_text(text, verbatim)
+  text = (expand_tabs(text or ""):gsub("%s+$", ""))
+  if text == "" then
+    return { "" }
+  end
+  if #text <= WRAP_WIDTH then
+    return { text }
+  end
+
+  local lines = {}
+  if verbatim then
+    while #text > WRAP_WIDTH do
+      lines[#lines + 1], text = text:sub(1, WRAP_WIDTH), text:sub(WRAP_WIDTH + 1)
+    end
+    lines[#lines + 1] = text
+    return lines
+  end
+
+  -- Continuation indent, dropped when it's so deep that little would fit after it.
+  local indent = text:match("^ *")
+  if #indent > WRAP_WIDTH / 2 then
+    indent = ""
+  end
+  local cur, pos = nil, 1
+  while true do
+    local gap, word, nxt = text:match("^(%s*)(%S+)()", pos)
+    if not word then
+      break
+    end
+    pos = nxt
+    if cur == nil then
+      cur = gap .. word -- the first token keeps the line's own indent
+    elseif #cur + #gap + #word <= WRAP_WIDTH then
+      cur = cur .. gap .. word -- the gap goes through as typed, not squashed
+    else
+      lines[#lines + 1], cur = cur, indent .. word
+    end
+    while #cur > WRAP_WIDTH do -- token too long to ever fit: bite off a chunk
+      lines[#lines + 1], cur = cur:sub(1, WRAP_WIDTH), cur:sub(WRAP_WIDTH + 1)
+    end
+  end
+  lines[#lines + 1] = cur or ""
   return lines
+end
+
+--- Split a comment body into the lines it renders as. Prose reflows to
+--- WRAP_WIDTH, but lines inside a ``` / ~~~ fence are kept verbatim, so a code
+--- snippet renders with its indentation and alignment intact. The fence markers
+--- themselves are drawn as written — this is a plain-text rendering of the body,
+--- not a markdown renderer.
+---@param body string?
+---@return string[]
+function M.body_lines(body)
+  local out, fence = {}, nil
+  for _, line in ipairs(vim.split((body or ""):gsub("\r", ""), "\n", { plain = true })) do
+    local marker = line:match("^%s*(```+)") or line:match("^%s*(~~~+)")
+    local verbatim = fence ~= nil
+    if fence then
+      -- Closes on a run of the same character, at least as long, and nothing
+      -- else on the line (a ```lua inside a block opens nothing, and the info
+      -- string only ever sits on the opening fence).
+      local closes = marker
+        and marker:sub(1, 1) == fence:sub(1, 1)
+        and #marker >= #fence
+        and line:match("^%s*[`~]+%s*$") ~= nil
+      if closes then
+        fence = nil
+      end
+    elseif marker then
+      fence, verbatim = marker, true
+    end
+    vim.list_extend(out, M.wrap_text(line, verbatim))
+  end
+  return out
 end
 
 --- Keep drafts anchored to their text while the buffer is edited. Live comments
@@ -785,15 +890,8 @@ local function render_buf(buf)
           { "▌ ", "ReviewCommentDraftSign" },
           { "@you (draft, unsent)", "ReviewCommentDraft" },
         })
-        for _, line in
-          ipairs(vim.split((entry.d.body or ""):gsub("\r", ""), "\n", { plain = true }))
-        do
-          for _, seg in ipairs(wrap_text(line)) do
-            table.insert(
-              virt,
-              { { "▌ ", "ReviewCommentDraftSign" }, { seg, "ReviewCommentDraft" } }
-            )
-          end
+        for _, seg in ipairs(M.body_lines(entry.d.body)) do
+          table.insert(virt, { { "▌ ", "ReviewCommentDraftSign" }, { seg, "ReviewCommentDraft" } })
         end
       else
         local c = entry.c
@@ -812,10 +910,8 @@ local function render_buf(buf)
           header[#header + 1] = { "  (resolved)", "ReviewCommentResolved" }
         end
         table.insert(virt, header)
-        for _, line in ipairs(vim.split((c.body or ""):gsub("\r", ""), "\n", { plain = true })) do
-          for _, seg in ipairs(wrap_text(line)) do
-            table.insert(virt, { { "▌ ", "ReviewCommentSign" }, { seg, "ReviewComment" } })
-          end
+        for _, seg in ipairs(M.body_lines(c.body)) do
+          table.insert(virt, { { "▌ ", "ReviewCommentSign" }, { seg, "ReviewComment" } })
         end
       end
     end
@@ -1220,37 +1316,33 @@ function M.edit()
   end)
 end
 
---- Submit all drafts as one GitHub review. The verdict (approve /
---- request-changes / comment) comes from the injected status source
---- (M.opts.verdict) when configured — inferred, not chosen — else a picker asks;
---- a compose float then shows it in its title and takes an optional review
---- summary — <C-s> sends (even empty), q cancels, so the float is the
---- confirmation. On success every draft is cleared, so continuing the review
---- starts a fresh batch. Submitting with no drafts sends a bare verdict (e.g. a
---- plain approve).
---- The line numbers GitHub will accept a review comment on, per repo-relative
---- path and side: `right` (head-side — added and context lines) and `left`
+--- The line numbers a review comment can anchor to, read out of a unified diff:
+--- per new-file path, `right` (head-side — added and context lines) and `left`
 --- (base-side — deleted and context lines). A comment whose (path, line, side)
 --- isn't one of these 422s the whole review, so submit validates against this
---- first. Parses `gh pr diff`; returns nil if that call fails, and the caller
---- then skips validation and lets GitHub arbitrate as before.
----@param root string
----@param number integer
----@return table<string, { right: table<integer, boolean>, left: table<integer, boolean> }>?
-local function pr_diff_lines(root, number)
-  local obj = sh({ "gh", "pr", "diff", tostring(number) }, root)
-  if obj.code ~= 0 then
-    return nil
-  end
-  -- Walk the unified diff, tracking head/base line counters per hunk header
-  -- (@@ -base,_ +head,_ @@) and marking each line the API can anchor to.
+--- first.
+---@param text string a unified diff
+---@return table<string, { right: table<integer, boolean>, left: table<integer, boolean> }>
+function M.diff_line_sets(text)
+  -- Walk the diff, tracking head/base line counters per hunk header
+  -- (@@ -base,_ +head,_ @@) and marking each line the API can anchor to. File
+  -- headers are only read outside a hunk (rline == nil), so a "+++ "/"--- " that
+  -- is really added or deleted *content* counts as content.
   local files, cur, rline, lline = {}, nil, nil, nil
-  for line in (obj.stdout .. "\n"):gmatch("(.-)\n") do
-    local newpath = line:match("^%+%+%+ b/(.*)")
-    if newpath then
-      cur = { right = {}, left = {} }
-      files[newpath] = cur
-    elseif not line:match("^%-%-%- ") then -- ignore the old-path header
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    if line:match("^diff %-%-git ") then
+      cur, rline, lline = nil, nil, nil -- next file: headers below are headers
+    elseif rline == nil and line:match("^%+%+%+ ") then
+      -- A deleted file's new path is /dev/null — nothing to anchor there, and
+      -- its hunks must not spill into the previous file's sets.
+      local newpath = line:match("^%+%+%+ b/(.*)")
+      cur = newpath and { right = {}, left = {} } or nil
+      if newpath then
+        files[newpath] = cur
+      end
+    elseif not (rline == nil and line:match("^%-%-%- ")) then
+      -- (an old-path header outside a hunk falls through: the new path is what
+      -- GitHub anchors on)
       local base, head = line:match("^@@ %-(%d+),?%d* %+(%d+),?%d* @@")
       if base then
         lline, rline = tonumber(base), tonumber(head)
@@ -1270,6 +1362,126 @@ local function pr_diff_lines(root, number)
     end
   end
   return files
+end
+
+--- The anchorable line sets for a submit, measured against `commit` — the same
+--- commit the review's line numbers will be read against, so validation and
+--- payload agree. At the PR head that's `gh pr diff`; at an older local HEAD we
+--- diff it against the PR base ourselves (three-dot, the range GitHub shows).
+--- Returns nil when neither is available — the caller then skips validation and
+--- lets GitHub arbitrate, rather than measuring against the wrong commit.
+---@param root string
+---@param pr { number: integer, head: string, base: string? }
+---@param commit string
+---@return table<string, { right: table<integer, boolean>, left: table<integer, boolean> }>?
+local function pr_diff_lines(root, pr, commit)
+  local obj
+  if commit == pr.head then
+    obj = sh({ "gh", "pr", "diff", tostring(pr.number) }, root)
+  elseif pr.base then
+    -- The base commit may not be local (never fetched); a non-zero exit here
+    -- falls through to "no validation".
+    obj = sh({ "git", "-C", root, "diff", "--no-color", pr.base .. "..." .. commit })
+  else
+    return nil
+  end
+  if obj.code ~= 0 then
+    return nil
+  end
+  return M.diff_line_sets(obj.stdout)
+end
+
+--- The commit a submitted review's line numbers are read against. GitHub's head
+--- is the wrong answer whenever the PR has moved on since you checked out: your
+--- buffers — and so every drafted line — belong to the commit you have locally,
+--- and anchoring them to a newer head lands them silently on whatever text now
+--- occupies those numbers. So we anchor to the local HEAD, provided GitHub knows
+--- it as one of the PR's commits (it accepts no others). Returns (sha, reason):
+--- reason is nil on the happy path, and says why when we had to fall back to the
+--- PR head. If the commit list can't be fetched we trust the local HEAD — a
+--- stale anchor misplaces comments quietly, whereas a commit GitHub doesn't know
+--- just fails the submit outright.
+---@param root string
+---@param pr { number: integer, head: string }
+---@return string sha, string? reason
+local function resolve_commit(root, pr)
+  local obj = sh({ "git", "-C", root, "rev-parse", "HEAD" })
+  local head = (obj.code == 0) and vim.trim(obj.stdout) or ""
+  if head == "" then
+    return pr.head, "couldn't read the local HEAD"
+  end
+  if head == pr.head then
+    return head
+  end
+  local endpoint = ("repos/:owner/:repo/pulls/%d/commits?per_page=100"):format(pr.number)
+  local pages = gh_json({ "api", "--paginate", "--slurp", endpoint }, root)
+  if not pages then
+    return head
+  end
+  for _, page in ipairs(pages) do
+    for _, c in ipairs(page) do
+      if c.sha == head then
+        return head
+      end
+    end
+  end
+  return pr.head,
+    ("the local HEAD (%s) isn't a commit in this PR — push it first"):format(head:sub(1, 7))
+end
+
+--- The working-copy text of a repo-relative path: the live buffer when one is
+--- loaded (drafts anchor to buffer lines, so unsaved edits count), else the file
+--- on disk. nil when neither can be read.
+---@param root string
+---@param rel string
+---@return string?
+local function working_text(root, rel)
+  local abs = vim.fs.normalize(root .. "/" .. rel)
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    local name = vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) or ""
+    if name ~= "" and vim.fs.normalize(name) == abs then
+      return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") .. "\n"
+    end
+  end
+  if vim.fn.filereadable(abs) == 1 then
+    return table.concat(vim.fn.readfile(abs), "\n") .. "\n"
+  end
+  return nil
+end
+
+--- Map a working-copy line of `rel` back onto the same text in `commit`. A
+--- draft's line is wherever you dropped it in the buffer, but the review's
+--- numbers are read against `commit`, so local edits above a draft (or an
+--- unstaged rewrite around it) would otherwise shift where it lands. The
+--- returned function gives the commit-side line, or nil when the line has no
+--- counterpart there — text that only exists locally has nothing on GitHub to
+--- anchor to. Falls back to the identity when the file can't be read at
+--- `commit` (a locally-added file, say); validation then catches it.
+---@param root string
+---@param commit string
+---@param rel string
+---@return fun(line: integer): integer?
+local function commit_line_mapper(root, commit, rel)
+  local key = commit .. ":" .. rel
+  if M.base_blob[key] == nil then
+    local obj = sh({ "git", "-C", root, "show", key })
+    M.base_blob[key] = (obj.code == 0) and obj.stdout or false
+  end
+  local blob = M.base_blob[key]
+  local work = blob and working_text(root, rel)
+  -- Diff working copy -> commit (the reverse of the render-time remap), so
+  -- remap_line carries a buffer line back; a local-only line comes back
+  -- untracked.
+  local hunks = work and vim.diff(work, blob, { result_type = "indices" })
+  if not hunks then
+    return function(line)
+      return line
+    end
+  end
+  return function(line)
+    local row, tracked = M.remap_line(hunks, line)
+    return tracked and row or nil
+  end
 end
 
 --- Fold off-diff drafts into one block for the review body: each as its
@@ -1321,6 +1533,19 @@ function M.yank_drafts()
   vim.notify(("review: yanked %d drafted comment(s) to register %q"):format(#entries, reg))
 end
 
+--- Submit all drafts as one GitHub review. The verdict (approve /
+--- request-changes / comment) comes from the injected status source
+--- (M.opts.verdict) when configured — inferred, not chosen — else a picker asks;
+--- a compose float then shows it in its title and takes an optional review
+--- summary — <C-s> sends (even empty), q cancels, so the float is the
+--- confirmation. On success every draft is cleared, so continuing the review
+--- starts a fresh batch. Submitting with no drafts sends a bare verdict (e.g. a
+--- plain approve).
+---
+--- The review is anchored to the commit you're actually reading (resolve_commit)
+--- and every drafted line is mapped back onto that commit's copy of the file
+--- (commit_line_mapper), so a PR that moved on — or a working copy that has —
+--- can't slide the comments onto other code.
 function M.submit()
   local root = current_root()
   if not root then
@@ -1362,26 +1587,56 @@ function M.submit()
       return
     end
 
+    -- The commit the review's line numbers will be read against. Falling back to
+    -- the PR head means the numbers describe a file version you haven't seen, so
+    -- say so and let the reviewer push first instead.
+    local commit, fallback = resolve_commit(root, pr)
+    if fallback and draft_count > 0 then
+      local idx = pick({ "Submit against the PR head anyway", "Cancel" }, {
+        prompt = ("%s. Comments would be placed by their line numbers in %s, which isn't the code you're looking at."):format(
+          fallback,
+          pr.head:sub(1, 7)
+        ),
+      })
+      if idx ~= 1 then
+        return
+      end
+    end
+
     -- Partition drafts into those GitHub will anchor inline and those off the
     -- diff. Off-diff ones can't be line comments (one would 422 the whole batch),
     -- so we fold them into the review summary instead — but that drops their
     -- inline anchor, so we confirm below and let the reviewer back out to move
     -- them first. A nil diff (fetch failed) skips validation: treat all as inline
     -- and let GitHub arbitrate, the pre-change behaviour.
-    local diff_lines = pr_diff_lines(root, pr.number)
+    local diff_lines = pr_diff_lines(root, pr, commit)
     local inline, offdiff = {}, {}
     for rel, list in pairs(M.drafts) do
+      -- Drafts carry working-copy lines; the payload's are read against `commit`.
+      local to_commit = commit_line_mapper(root, commit, rel)
       for _, d in ipairs(list) do
         local side = d.side or "RIGHT"
+        -- A LEFT-side line already numbers against the base file, not the
+        -- buffer, so only RIGHT needs the trip back through the local edits. A
+        -- range whose start has no counterpart in `commit` still comments on its
+        -- end line; only the span is lost.
+        local line, start_line = d.line, d.start_line
+        if side == "RIGHT" then
+          line = to_commit(d.line)
+          start_line = d.start_line and to_commit(d.start_line) or nil
+        end
         local set = diff_lines
           and diff_lines[rel]
           and (side == "LEFT" and diff_lines[rel].left or diff_lines[rel].right)
-        local ok = diff_lines == nil
-          or (set ~= nil and set[d.line] and (not d.start_line or set[d.start_line]))
+        local ok = line ~= nil
+          and (
+            diff_lines == nil
+            or (set ~= nil and set[line] and (not start_line or set[start_line]))
+          )
         if ok then
-          local c = { path = rel, line = d.line, side = side, body = d.body }
-          if d.start_line then
-            c.start_line = d.start_line
+          local c = { path = rel, line = line, side = side, body = d.body }
+          if start_line and start_line < line then
+            c.start_line = start_line
             c.start_side = side
           end
           inline[#inline + 1] = c
@@ -1416,7 +1671,7 @@ function M.submit()
     )
     open_input(title, nil, function(body, close)
       run(function()
-        local payload = { commit_id = pr.head, event = verdict }
+        local payload = { commit_id = commit, event = verdict }
         if #inline > 0 then
           payload.comments = inline
         end
@@ -1450,7 +1705,12 @@ function M.submit()
           M.drafts = {}
           save_drafts(root)
           vim.notify(
-            ("review: submitted %s (%d inline, %d folded)"):format(verdict, #inline, #offdiff)
+            ("review: submitted %s @ %s (%d inline, %d folded)"):format(
+              verdict,
+              commit:sub(1, 7),
+              #inline,
+              #offdiff
+            )
           )
           fetch_render()
         else

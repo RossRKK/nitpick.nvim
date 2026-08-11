@@ -6,6 +6,12 @@ and submit the batch as a PR review. Comment positions survive local edits (they
 remap across the diff), and comment-to-comment navigation moves you through the
 thread.
 
+Submitting anchors the review to the commit you're actually reading — your local
+HEAD, not whatever the PR head has moved on to — and maps every drafted line back
+onto that commit, so comments land on the code you commented on. A drafted line
+that exists only in your working copy has nothing to anchor to, so it folds into
+the review summary instead of landing on unrelated code.
+
 Pairs with [triage.nvim][] (per-file review status), but stands alone.
 
 ## Requirements
@@ -84,8 +90,9 @@ make test
 ```
 
 Headless plenary/busted; covers the tree-decorator set (which paths light up once
-comments and drafts are folded together), the line remap across edits, and
-comment navigation.
+comments and drafts are folded together), the line remap across edits, comment
+navigation, comment-body layout (wrapping that leaves code snippets' whitespace
+alone), and the diff parse behind submit's line validation.
 
 [neo-tree]: https://github.com/nvim-neo-tree/neo-tree.nvim
 [triage.nvim]: https://github.com/RossRKK/triage.nvim

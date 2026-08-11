@@ -1,6 +1,7 @@
 -- Pure logic in nitpick/init.lua: the tree-decorator set (which paths light up
 -- as "has comments" once live comments and unsent drafts are folded together),
--- the line remap across local edits, and comment-to-comment navigation.
+-- the line remap across local edits, comment-to-comment navigation, how a
+-- comment body is laid out for display, and which lines a review may anchor to.
 
 local assert = require("luassert")
 local comments = require("nitpick")
@@ -162,6 +163,127 @@ describe("nitpick.remap_line", function()
     local row, tracked = remap({ { 0, 0, 1, 2 }, { 2, 1, 3, 0 } }, 4)
     assert.equals(5, row) -- 4 + 2 (insert) - 1 (delete)
     assert.is_true(tracked)
+  end)
+end)
+
+describe("nitpick.wrap_text", function()
+  local wrap = comments.wrap_text
+
+  -- The bug this covers: bodies used to be rebuilt word by word, so every run of
+  -- whitespace collapsed to one space and a pasted snippet lost its shape.
+  it("keeps indentation and inner spacing on a line that fits", function()
+    assert.same({ "    if x then      -- aligned" }, wrap("    if x then      -- aligned"))
+  end)
+
+  it("expands tabs to a fixed stop rather than dropping them", function()
+    assert.same({ "    x = 1" }, wrap("\tx = 1"))
+    assert.same({ "a   b" }, wrap("a\tb"))
+  end)
+
+  it("trims trailing whitespace and keeps a blank line blank", function()
+    assert.same({ "" }, wrap(""))
+    assert.same({ "" }, wrap("   "))
+    assert.same({ "code" }, wrap("code   "))
+  end)
+
+  it("wraps a long line at a space, indenting the continuation to match", function()
+    local lines = wrap("  " .. string.rep("word ", 30))
+    assert.is_true(#lines > 1)
+    assert.equals("  word word", lines[1]:sub(1, 11))
+    for _, l in ipairs(lines) do
+      assert.is_true(#l <= 80)
+      assert.equals("  ", l:sub(1, 2)) -- continuations carry the original indent
+    end
+  end)
+
+  it("hard-breaks a token too long to ever fit", function()
+    local lines = wrap(string.rep("u", 190))
+    assert.same({ string.rep("u", 80), string.rep("u", 80), string.rep("u", 30) }, lines)
+  end)
+
+  -- Verbatim (a line inside a code fence) must never reflow: an over-long line
+  -- is chopped, so every character stays where the author put it.
+  it("chops but never reflows a verbatim line", function()
+    local text = "    " .. string.rep("a", 40) .. "  " .. string.rep("b", 50)
+    local lines = wrap(text, true)
+    assert.same(text, table.concat(lines))
+    assert.equals(80, #lines[1])
+  end)
+end)
+
+describe("nitpick.body_lines", function()
+  local body_lines = comments.body_lines
+
+  it("keeps a fenced snippet exactly as written", function()
+    assert.same({
+      "look:",
+      "```lua",
+      "if x then",
+      "    y  =  1",
+      "end",
+      "```",
+    }, body_lines("look:\n```lua\nif x then\n\ty  =  1\nend\n```"))
+  end)
+
+  it("still reflows prose outside the fence", function()
+    local lines = body_lines(string.rep("word ", 40))
+    assert.is_true(#lines > 1)
+  end)
+
+  it("does not close a fence on an info-string line inside it", function()
+    local lines = body_lines("```\n```lua still code\n```\nafter")
+    assert.same({ "```", "```lua still code", "```", "after" }, lines)
+  end)
+
+  it("handles an unterminated fence and CRLF bodies", function()
+    assert.same({ "```", "  raw" }, body_lines("```\r\n  raw"))
+  end)
+
+  it("is empty-safe", function()
+    assert.same({ "" }, body_lines(nil))
+  end)
+end)
+
+describe("nitpick.diff_line_sets", function()
+  local sets = comments.diff_line_sets
+
+  -- A unified diff as `gh pr diff` / `git diff base...head` emit it, including
+  -- content lines that look like file headers and a deleted file (new path
+  -- /dev/null), whose hunks must not leak into the previous file's sets.
+  local diff = table.concat({
+    "diff --git a/src/a.lua b/src/a.lua",
+    "index 1111111..2222222 100644",
+    "--- a/src/a.lua",
+    "+++ b/src/a.lua",
+    "@@ -10,3 +10,4 @@ function foo()",
+    " context",
+    "-gone",
+    "+added",
+    "+--- not a header",
+    "diff --git a/old.txt b/old.txt",
+    "deleted file mode 100644",
+    "--- a/old.txt",
+    "+++ /dev/null",
+    "@@ -1,2 +0,0 @@",
+    "-one",
+    "-two",
+  }, "\n")
+
+  it("marks added and context lines on the right, deleted and context on the left", function()
+    local a = sets(diff)["src/a.lua"]
+    assert.same({ [10] = true, [11] = true, [12] = true }, a.right) -- context, added, added
+    assert.same({ [10] = true, [11] = true }, a.left) -- context, deleted
+  end)
+
+  it("keeps a deleted file (and its hunks) out of the sets", function()
+    local files = sets(diff)
+    assert.is_nil(files["old.txt"])
+    assert.is_nil(files["/dev/null"])
+    assert.is_nil(sets(diff)["src/a.lua"].left[1]) -- old.txt's deletions didn't leak
+  end)
+
+  it("is empty for an empty diff", function()
+    assert.same({}, sets(""))
   end)
 end)
 
