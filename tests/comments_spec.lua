@@ -97,6 +97,8 @@ describe("nitpick surface", function()
       "edit",
       "discard_draft",
       "submit",
+      "yank_drafts",
+      "export_drafts",
       "set_shown",
       "refresh",
       "has_comments",
@@ -241,6 +243,41 @@ describe("nitpick.body_lines", function()
 
   it("is empty-safe", function()
     assert.same({ "" }, body_lines(nil))
+  end)
+end)
+
+describe("nitpick.drafts_markdown", function()
+  local md = comments.drafts_markdown
+
+  local entries = {
+    { path = "src/a.lua", line = 12, body = "nit: name this" },
+    { path = "src/a.lua", line = 40, start_line = 36, body = "this block\nis suspect" },
+    { path = "src/b.lua", line = 3, body = "```lua\n    keep  spacing\n```" },
+  }
+
+  it("heads the document with what was being reviewed", function()
+    local out = md(entries, { branch = "feat/x", commit = "abcdef1234", when = "2026-08-11 09:00" })
+    assert.equals("# Review drafts — feat/x @ abcdef1", out[1])
+    assert.equals("3 comment(s), saved 2026-08-11 09:00", out[3])
+  end)
+
+  it("groups by file, one subsection per comment, ranges spelled out", function()
+    local out = table.concat(md(entries), "\n")
+    assert.equals(1, select(2, out:gsub("## src/a%.lua", ""))) -- one heading for two comments
+    assert.is_truthy(out:find("### L12\n\nnit: name this", 1, true))
+    assert.is_truthy(out:find("### L36-L40\n\nthis block\nis suspect", 1, true))
+    assert.is_truthy(out:find("## src/b%.lua"))
+  end)
+
+  -- The point of keeping them: a body must survive the round trip untouched.
+  it("writes bodies verbatim, including code blocks", function()
+    local out = table.concat(md(entries), "\n")
+    assert.is_truthy(out:find("```lua\n    keep  spacing\n```", 1, true))
+  end)
+
+  it("works without any metadata", function()
+    assert.equals("# Review drafts", md(entries)[1])
+    assert.equals("3 comment(s)", md(entries)[3])
   end)
 end)
 

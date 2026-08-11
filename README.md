@@ -12,7 +12,11 @@ onto that commit, so comments land on the code you commented on. A drafted line
 that exists only in your working copy has nothing to anchor to, so it folds into
 the review summary instead of landing on unrelated code, and a HEAD the PR
 doesn't contain (unpushed commits) fails the submit rather than guessing at an
-anchor: push, then submit again — the drafts keep.
+anchor — a verdict included, since that too would speak for code that isn't in
+the PR. Push, then submit again; the drafts keep. If you'd rather bail out,
+`:ReviewExportDrafts` (`<leader>rw`) writes the whole pass to a markdown file —
+a heading per file, a `### L36-L40` per comment, bodies verbatim — so a review
+you can't send isn't a review you lose.
 
 Pairs with [triage.nvim][] (per-file review status), but stands alone.
 
@@ -42,9 +46,12 @@ Pairs with [triage.nvim][] (per-file review status), but stands alone.
 
 `require("nitpick").setup(opts)` accepts:
 
-| Key       | Type       | Description                                                        |
-| --------- | ---------- | ----------------------------------------------------------------- |
-| `verdict` | `fun()`    | Called to resolve the review verdict on submit. Wire triage's `verdict` here. |
+| Key             | Type    | Description                                                        |
+| --------------- | ------- | ------------------------------------------------------------------ |
+| `verdict`       | `fun()` | Called to resolve the review verdict on submit. Wire triage's `verdict` here. |
+| `yank_register` | `string`| Register `:ReviewYankDrafts` writes to. Defaults to `+`.            |
+| `export_path`   | `string`| File `:ReviewExportDrafts` writes to. Defaults to `nitpick-drafts.md` in the repo root; the command also takes a path. |
+| `keys`          | `table` | Per-action left-hand side; set one to `false` to leave it unmapped. |
 
 The neo-tree "has comments" marker is registered as the `nitpick_marker`
 component (`require("nitpick.adapter").marker_component`); add it to your

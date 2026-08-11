@@ -1500,28 +1500,16 @@ local function fold_offdiff(offdiff)
   return table.concat(parts, "\n\n---\n\n")
 end
 
---- Copy every drafted comment to a register, formatted as `path:line` followed
---- by the body — the same shape M.submit folds off-diff drafts into, since both
---- are "read this comment without GitHub's line-anchoring". Handy for pasting a
---- whole pass into a PR description, a chat, or another tool entirely. Sorted by
---- path then line so the order is stable across sessions. No-ops (with a notify)
---- when there's nothing drafted. Register defaults to "+" (system clipboard);
---- override via opts.yank_register.
-function M.yank_drafts()
-  local root = current_root()
-  if root then
-    ensure_drafts(root)
-  end
-
+--- Every drafted comment as a flat list, ordered by path then line so exports
+--- read top-down through the tree and don't reshuffle between sessions.
+---@return { path: string, line: integer, start_line: integer?, body: string }[]
+local function draft_entries()
   local entries = {}
   for rel, list in pairs(M.drafts) do
     for _, d in ipairs(list) do
-      entries[#entries + 1] = { path = rel, line = d.line, body = d.body }
+      entries[#entries + 1] =
+        { path = rel, line = d.line, start_line = d.start_line, body = d.body }
     end
-  end
-  if #entries == 0 then
-    vim.notify("review: no drafted comments to yank", vim.log.levels.INFO)
-    return
   end
   table.sort(entries, function(a, b)
     if a.path ~= b.path then
@@ -1529,10 +1517,136 @@ function M.yank_drafts()
     end
     return a.line < b.line
   end)
+  return entries
+end
+
+--- Copy every drafted comment to a register, formatted as `path:line` followed
+--- by the body — the same shape M.submit folds off-diff drafts into, since both
+--- are "read this comment without GitHub's line-anchoring". Handy for pasting a
+--- whole pass into a PR description, a chat, or another tool entirely. No-ops
+--- (with a notify) when there's nothing drafted. Register defaults to "+" (system
+--- clipboard); override via opts.yank_register.
+function M.yank_drafts()
+  local root = current_root()
+  if root then
+    ensure_drafts(root)
+  end
+
+  local entries = draft_entries()
+  if #entries == 0 then
+    vim.notify("review: no drafted comments to yank", vim.log.levels.INFO)
+    return
+  end
 
   local reg = (M.opts.yank_register and M.opts.yank_register ~= "") and M.opts.yank_register or "+"
   vim.fn.setreg(reg, fold_offdiff(entries))
   vim.notify(("review: yanked %d drafted comment(s) to register %q"):format(#entries, reg))
+end
+
+--- Render drafts as a standalone markdown document: a heading naming what was
+--- being reviewed, then a section per file and a `### L12-L15` subsection per
+--- comment. Unlike the register yank (one pasteable blob) this is meant to be
+--- kept and read on its own — the review you did, in a file, when GitHub can't
+--- take it.
+---@param entries { path: string, line: integer, start_line: integer?, body: string }[]
+---@param meta { branch: string?, commit: string?, when: string? }?
+---@return string[] lines
+function M.drafts_markdown(entries, meta)
+  meta = meta or {}
+  local subject = {}
+  if meta.branch and meta.branch ~= "" then
+    subject[#subject + 1] = meta.branch
+  end
+  if meta.commit and meta.commit ~= "" then
+    subject[#subject + 1] = meta.commit:sub(1, 7)
+  end
+  local out = {
+    "# Review drafts" .. (#subject > 0 and (" — " .. table.concat(subject, " @ ")) or ""),
+    "",
+    ("%d comment(s)%s"):format(
+      #entries,
+      (meta.when and meta.when ~= "") and (", saved " .. meta.when) or ""
+    ),
+  }
+
+  local path
+  local function push(...)
+    for _, line in ipairs({ ... }) do
+      out[#out + 1] = line
+    end
+  end
+  for _, e in ipairs(entries) do
+    if e.path ~= path then
+      path = e.path
+      push("", "## " .. e.path)
+    end
+    local where = e.start_line and ("L%d-L%d"):format(e.start_line, e.line)
+      or ("L%d"):format(e.line)
+    push("", "### " .. where, "")
+    vim.list_extend(out, vim.split((e.body or ""):gsub("\r", ""), "\n", { plain = true }))
+  end
+  out[#out + 1] = ""
+  return out
+end
+
+--- Write every drafted comment out as markdown — the escape hatch for a review
+--- that can't be submitted (an unpushed HEAD, a closed PR, no network) or that
+--- you'd rather keep as a file. Drafts are left alone: this copies them out, it
+--- doesn't clear them. `path` (or opts.export_path) overrides the default of
+--- nitpick-drafts.md in the repo root; an existing file asks before it's
+--- overwritten or appended to.
+---@param path string?
+function M.export_drafts(path)
+  run(function()
+    local root = current_root()
+    if root then
+      ensure_drafts(root)
+    end
+    local entries = draft_entries()
+    if #entries == 0 then
+      vim.notify("review: no drafted comments to export", vim.log.levels.INFO)
+      return
+    end
+
+    local target = (path and path ~= "") and path
+      or M.opts.export_path
+      or ((root or vim.fn.getcwd()) .. "/nitpick-drafts.md")
+    target = vim.fn.fnamemodify(vim.fn.expand(target), ":p")
+
+    local meta = { when = os.date("%Y-%m-%d %H:%M") }
+    if root then
+      meta.branch = vim.trim(sh({ "git", "-C", root, "branch", "--show-current" }).stdout or "")
+      meta.commit = vim.trim(sh({ "git", "-C", root, "rev-parse", "HEAD" }).stdout or "")
+    end
+
+    -- An export is often the second thing you reach for after a failed submit,
+    -- so never quietly drop what an earlier one wrote.
+    local flags = ""
+    if vim.fn.filereadable(target) == 1 then
+      local idx = pick({ "Append", "Overwrite", "Cancel" }, { prompt = target .. " already exists:" })
+      if idx == 1 then
+        flags = "a"
+      elseif idx ~= 2 then
+        return
+      end
+    end
+
+    local dir = vim.fs.dirname(target)
+    if dir and vim.fn.isdirectory(dir) == 0 then
+      vim.fn.mkdir(dir, "p")
+    end
+    if vim.fn.writefile(M.drafts_markdown(entries, meta), target, flags) ~= 0 then
+      vim.notify("review: couldn't write " .. target, vim.log.levels.ERROR)
+      return
+    end
+    vim.notify(
+      ("review: %s %d drafted comment(s) to %s"):format(
+        flags == "a" and "appended" or "wrote",
+        #entries,
+        vim.fn.fnamemodify(target, ":~")
+      )
+    )
+  end)
 end
 
 --- Submit all drafts as one GitHub review. The verdict (approve /
@@ -1548,7 +1662,9 @@ end
 --- and every drafted line is mapped back onto that commit's copy of the file
 --- (commit_line_mapper), so a PR that moved on — or a working copy that has —
 --- can't slide the comments onto other code. A local HEAD the PR doesn't contain
---- aborts the submit; the drafts keep, so pushing and submitting again is the fix.
+--- aborts the submit — including a bare verdict, which is just as much a
+--- statement about code you'd not have read — and the drafts keep, so pushing
+--- and submitting again is the fix (M.export_drafts if you'd rather bail out).
 function M.submit()
   local root = current_root()
   if not root then
@@ -1590,17 +1706,17 @@ function M.submit()
       return
     end
 
-    -- The commit the drafted lines will be read against. A verdict with no
-    -- drafts has no lines to place, so it needs no anchor at all (GitHub then
-    -- takes the latest commit) and doesn't care about the state of your checkout.
-    local commit
-    if draft_count > 0 then
-      local reason
-      commit, reason = resolve_commit(root, pr)
-      if not commit then
-        vim.notify("review: " .. reason, vim.log.levels.ERROR)
-        return
-      end
+    -- The commit this review speaks for: where its drafted lines are read, and —
+    -- drafts or none — which code the verdict is a verdict on. A HEAD the PR
+    -- doesn't contain means you've been reading something that isn't in the PR,
+    -- so an approve is no safer to send than a line comment.
+    local commit, reason = resolve_commit(root, pr)
+    if not commit then
+      vim.notify(
+        ("review: %s (:ReviewExportDrafts keeps your drafts)"):format(reason),
+        vim.log.levels.ERROR
+      )
+      return
     end
 
     -- Partition drafts into those GitHub will anchor inline and those off the
@@ -1609,7 +1725,7 @@ function M.submit()
     -- inline anchor, so we confirm below and let the reviewer back out to move
     -- them first. A nil diff (fetch failed) skips validation: treat all as inline
     -- and let GitHub arbitrate, the pre-change behaviour.
-    local diff_lines = commit and pr_diff_lines(root, pr, commit)
+    local diff_lines = draft_count > 0 and pr_diff_lines(root, pr, commit) or nil
     local inline, offdiff = {}, {}
     for rel, list in pairs(M.drafts) do
       -- Drafts carry working-copy lines; the payload's are read against `commit`
@@ -1706,9 +1822,9 @@ function M.submit()
           M.drafts = {}
           save_drafts(root)
           vim.notify(
-            ("review: submitted %s%s (%d inline, %d folded)"):format(
+            ("review: submitted %s @ %s (%d inline, %d folded)"):format(
               verdict,
-              commit and (" @ " .. commit:sub(1, 7)) or "",
+              commit:sub(1, 7),
               #inline,
               #offdiff
             )
@@ -1867,17 +1983,20 @@ local default_keys = {
   discard = "<leader>rx",
   submit = "<leader>rS",
   yank = "<leader>ry",
+  export = "<leader>rw",
   refresh = "<leader>rC",
   outdated = "<leader>ro",
   resolved = "<leader>rs",
 }
 
 --- Configure nitpick.nvim.
----@param opts? { verdict?: fun(): ("APPROVE"|"REQUEST_CHANGES"|"COMMENT"|nil), keys?: table<string, string|false>, yank_register?: string }
+---@param opts? { verdict?: fun(): ("APPROVE"|"REQUEST_CHANGES"|"COMMENT"|nil), keys?: table<string, string|false>, yank_register?: string, export_path?: string }
 ---   verdict        status source for submit's review event; nil prompts via a picker.
 ---                  Wire it to triage.nvim's verdict to infer the event from triage.
 ---   keys           per-action left-hand side; see default_keys. false/"" disables one.
 ---   yank_register  register M.yank_drafts writes to; defaults to "+" (system clipboard).
+---   export_path    file M.export_drafts writes to; defaults to nitpick-drafts.md in
+---                  the repo root.
 function M.setup(opts)
   M.opts = opts or {}
   local function set_hl()
@@ -1953,6 +2072,9 @@ function M.setup(opts)
   mapk("discard", "n", M.discard_draft, "Review: discard draft on line")
   mapk("submit", "n", M.submit, "Review: submit drafted review (batched)")
   mapk("yank", "n", M.yank_drafts, "Review: yank all drafted comments to a register")
+  mapk("export", "n", function()
+    M.export_drafts()
+  end, "Review: write all drafted comments out as markdown")
   mapk("refresh", "n", M.refresh, "Review: refresh PR comments")
   mapk("outdated", "n", M.toggle_outdated, "Review: toggle outdated comments")
   mapk("resolved", "n", M.toggle_resolved, "Review: toggle resolved comments")
@@ -1996,6 +2118,13 @@ function M.setup(opts)
     M.yank_drafts,
     { desc = "Yank all drafted comments to a register" }
   )
+  vim.api.nvim_create_user_command("ReviewExportDrafts", function(a)
+    M.export_drafts(a.args)
+  end, {
+    nargs = "?",
+    complete = "file",
+    desc = "Write all drafted comments out as markdown (optional path)",
+  })
   vim.api.nvim_create_user_command(
     "ReviewCommentsRefresh",
     M.refresh,
