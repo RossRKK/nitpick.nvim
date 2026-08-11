@@ -40,11 +40,12 @@
 -- Submitting runs that remap in reverse. A review's line numbers are read
 -- against the commit it names, and the commit you're actually reading is your
 -- local HEAD — not the PR head, which may have moved on since you checked out —
--- so submit anchors to HEAD (when GitHub knows it as a commit of the PR) and
--- maps every drafted line back from the working copy to HEAD's copy of the file
--- first. A drafted line with no counterpart there (text that only exists
--- locally) can't be a line comment, so it folds into the review summary rather
--- than landing on unrelated code. See resolve_commit / commit_line_mapper.
+-- so submit anchors to HEAD and maps every drafted line back from the working
+-- copy to HEAD's copy of the file first. A drafted line with no counterpart
+-- there (text that only exists locally) can't be a line comment, so it folds
+-- into the review summary rather than landing on unrelated code. If GitHub
+-- doesn't know HEAD as a commit of the PR there's nowhere honest to anchor, so
+-- the submit fails rather than guessing. See resolve_commit / commit_line_mapper.
 --
 -- The PR is found from the active branch: none -> stay quiet; one -> use it;
 -- several -> ask once (remembered per branch). Rendering reads a cache, so only
@@ -1391,24 +1392,25 @@ local function pr_diff_lines(root, pr, commit)
   return M.diff_line_sets(obj.stdout)
 end
 
---- The commit a submitted review's line numbers are read against. GitHub's head
---- is the wrong answer whenever the PR has moved on since you checked out: your
---- buffers — and so every drafted line — belong to the commit you have locally,
---- and anchoring them to a newer head lands them silently on whatever text now
---- occupies those numbers. So we anchor to the local HEAD, provided GitHub knows
---- it as one of the PR's commits (it accepts no others). Returns (sha, reason):
---- reason is nil on the happy path, and says why when we had to fall back to the
---- PR head. If the commit list can't be fetched we trust the local HEAD — a
---- stale anchor misplaces comments quietly, whereas a commit GitHub doesn't know
---- just fails the submit outright.
+--- The commit a submitted review's line numbers are read against: the local
+--- HEAD, or nothing. GitHub's head is the wrong answer whenever the PR has moved
+--- on since you checked out — your buffers, and so every drafted line, belong to
+--- the commit you have locally, and anchoring them to a newer head lands them
+--- silently on whatever text now occupies those numbers. There's no second
+--- choice to fall back to for the same reason: a review anchored to a commit you
+--- haven't read is worse than one that didn't go out, so a HEAD GitHub doesn't
+--- know as part of the PR (unpushed, or a branch that was force-pushed out from
+--- under you) fails the submit instead. Returns (sha) or (nil, reason to show).
+--- A commit list we couldn't fetch isn't proof of anything, so the local HEAD
+--- still goes out — GitHub rejects it if it doesn't belong to the PR.
 ---@param root string
 ---@param pr { number: integer, head: string }
----@return string sha, string? reason
+---@return string? sha, string? reason
 local function resolve_commit(root, pr)
   local obj = sh({ "git", "-C", root, "rev-parse", "HEAD" })
   local head = (obj.code == 0) and vim.trim(obj.stdout) or ""
   if head == "" then
-    return pr.head, "couldn't read the local HEAD"
+    return nil, "couldn't read the local HEAD"
   end
   if head == pr.head then
     return head
@@ -1425,8 +1427,8 @@ local function resolve_commit(root, pr)
       end
     end
   end
-  return pr.head,
-    ("the local HEAD (%s) isn't a commit in this PR — push it first"):format(head:sub(1, 7))
+  return nil,
+    ("the local HEAD (%s) isn't a commit in this PR — push it, then submit"):format(head:sub(1, 7))
 end
 
 --- The working-copy text of a repo-relative path: the live buffer when one is
@@ -1545,7 +1547,8 @@ end
 --- The review is anchored to the commit you're actually reading (resolve_commit)
 --- and every drafted line is mapped back onto that commit's copy of the file
 --- (commit_line_mapper), so a PR that moved on — or a working copy that has —
---- can't slide the comments onto other code.
+--- can't slide the comments onto other code. A local HEAD the PR doesn't contain
+--- aborts the submit; the drafts keep, so pushing and submitting again is the fix.
 function M.submit()
   local root = current_root()
   if not root then
@@ -1587,18 +1590,15 @@ function M.submit()
       return
     end
 
-    -- The commit the review's line numbers will be read against. Falling back to
-    -- the PR head means the numbers describe a file version you haven't seen, so
-    -- say so and let the reviewer push first instead.
-    local commit, fallback = resolve_commit(root, pr)
-    if fallback and draft_count > 0 then
-      local idx = pick({ "Submit against the PR head anyway", "Cancel" }, {
-        prompt = ("%s. Comments would be placed by their line numbers in %s, which isn't the code you're looking at."):format(
-          fallback,
-          pr.head:sub(1, 7)
-        ),
-      })
-      if idx ~= 1 then
+    -- The commit the drafted lines will be read against. A verdict with no
+    -- drafts has no lines to place, so it needs no anchor at all (GitHub then
+    -- takes the latest commit) and doesn't care about the state of your checkout.
+    local commit
+    if draft_count > 0 then
+      local reason
+      commit, reason = resolve_commit(root, pr)
+      if not commit then
+        vim.notify("review: " .. reason, vim.log.levels.ERROR)
         return
       end
     end
@@ -1609,11 +1609,12 @@ function M.submit()
     -- inline anchor, so we confirm below and let the reviewer back out to move
     -- them first. A nil diff (fetch failed) skips validation: treat all as inline
     -- and let GitHub arbitrate, the pre-change behaviour.
-    local diff_lines = pr_diff_lines(root, pr, commit)
+    local diff_lines = commit and pr_diff_lines(root, pr, commit)
     local inline, offdiff = {}, {}
     for rel, list in pairs(M.drafts) do
-      -- Drafts carry working-copy lines; the payload's are read against `commit`.
-      local to_commit = commit_line_mapper(root, commit, rel)
+      -- Drafts carry working-copy lines; the payload's are read against `commit`
+      -- (which a file with nothing drafted on it doesn't need to look up).
+      local to_commit = #list > 0 and commit_line_mapper(root, commit, rel) or nil
       for _, d in ipairs(list) do
         local side = d.side or "RIGHT"
         -- A LEFT-side line already numbers against the base file, not the
@@ -1705,9 +1706,9 @@ function M.submit()
           M.drafts = {}
           save_drafts(root)
           vim.notify(
-            ("review: submitted %s @ %s (%d inline, %d folded)"):format(
+            ("review: submitted %s%s (%d inline, %d folded)"):format(
               verdict,
-              commit:sub(1, 7),
+              commit and (" @ " .. commit:sub(1, 7)) or "",
               #inline,
               #offdiff
             )

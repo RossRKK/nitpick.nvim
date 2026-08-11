@@ -10,7 +10,9 @@ Submitting anchors the review to the commit you're actually reading — your loc
 HEAD, not whatever the PR head has moved on to — and maps every drafted line back
 onto that commit, so comments land on the code you commented on. A drafted line
 that exists only in your working copy has nothing to anchor to, so it folds into
-the review summary instead of landing on unrelated code.
+the review summary instead of landing on unrelated code, and a HEAD the PR
+doesn't contain (unpushed commits) fails the submit rather than guessing at an
+anchor: push, then submit again — the drafts keep.
 
 Pairs with [triage.nvim][] (per-file review status), but stands alone.
 
