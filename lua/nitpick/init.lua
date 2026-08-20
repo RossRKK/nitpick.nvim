@@ -46,23 +46,29 @@ local M = {}
 -- User configuration, populated by M.setup(). See setup() for accepted keys.
 M.opts = {}
 
--- rel path -> list of raw review-comment objects from the GitHub API.
+-- Comment/draft state is keyed by repo root, not held for one repo at a time:
+-- with reviews running per repo (one project per tab), two repos can have their
+-- comments shown at once, and a single current-repo cache would render one
+-- repo's comments in the other's buffers (rel paths alone don't say whose).
+
+-- normalized root -> (rel path -> list of raw review-comment objects from the
+-- GitHub API).
 M.by_path = {}
--- rel path -> list of unsent draft comments { line, side, start_line?, body }.
--- Loaded from disk per repo; M.drafts_root records which repo they're for.
+-- normalized root -> (rel path -> list of unsent draft comments
+-- { line, side, start_line?, body }). Each repo's set loads from disk on first
+-- touch (see ensure_drafts).
 M.drafts = {}
-M.drafts_root = nil
--- Repo toplevel, set whenever we resolve one.
-M.root = nil
--- Remembers a manual PR choice for a branch so we don't re-prompt: {branch, number}.
+-- Remembers a manual PR choice for a branch so we don't re-prompt:
+-- {root, branch, number}.
 M.pr_choice = nil
 -- The authenticated GitHub login, cached; used to find your own comments to edit.
 M.viewer = nil
 -- login -> resolved display name, cached in-memory. "" means "resolved, but no
 -- display name set" (fall back to @login); nil means "not looked up yet".
 M.names = {}
--- Whether inline comments are currently drawn (driven by review mode).
-M.shown = false
+-- Repos whose inline comments are currently drawn (driven by review mode):
+-- normalized root -> true.
+M.shown_roots = {}
 -- Visibility toggles. Both outdated and resolved comments are kept in M.by_path
 -- and filtered at render time, so toggling either needs no re-fetch. Outdated
 -- shows by default (surfacing stale-line comments is the point); resolved hides
@@ -227,12 +233,42 @@ local function pick(items, opts)
   return coroutine.yield()
 end
 
---- Repo toplevel for the current buffer (cached on M.root). nil outside a repo.
+--- Normalized repo toplevel for the current buffer. nil outside a repo.
 ---@return string?
 local function current_root()
   local root = vim.fs.root(0, ".git")
-  M.root = root and vim.fs.normalize(root) or M.root
   return root and vim.fs.normalize(root) or nil
+end
+
+--- Normalized repo toplevel containing a buffer's file, or nil. Unnamed buffers
+--- resolve to nil on purpose — a scratch buffer belongs to no repo, so falling
+--- back to the cwd would render another repo's comments in it.
+---@param buf integer
+---@return string?
+local function buf_root(buf)
+  local name = vim.api.nvim_buf_get_name(buf)
+  if name == "" then
+    return nil
+  end
+  local root = vim.fs.root(name, ".git")
+  return root and vim.fs.normalize(root) or nil
+end
+
+--- Normalized repo root containing the cwd, or nil. The toggle/statusline
+--- anchor: mirrors how triage scopes review mode, so "this tab's repo" means
+--- the same thing to both plugins.
+---@return string?
+local function cwd_root()
+  local root = vim.fs.root(vim.fn.getcwd(), ".git")
+  return root and vim.fs.normalize(root) or nil
+end
+
+--- Is `path` equal to or under `root` (both normalized)?
+---@param path string
+---@param root string
+---@return boolean
+local function under(path, root)
+  return path == root or path:sub(1, #root + 1) == root .. "/"
 end
 
 --- A buffer's path relative to `root`, or nil if it's not under it.
@@ -297,10 +333,11 @@ local function load_drafts(root)
   return data
 end
 
----@param root string
+---@param root string normalized
 local function save_drafts(root)
   local path = drafts_file(root)
-  if not next(M.drafts) then
+  local drafts = M.drafts[root] or {}
+  if not next(drafts) then
     -- Nothing left: drop the file rather than leave an empty object behind.
     if vim.fn.filereadable(path) == 1 then
       vim.fn.delete(path)
@@ -310,7 +347,7 @@ local function save_drafts(root)
   -- Serialize without runtime-only fields (the "_mark" extmark id is only
   -- meaningful while its buffer is loaded in this session).
   local clean = {}
-  for rel, list in pairs(M.drafts) do
+  for rel, list in pairs(drafts) do
     clean[rel] = {}
     for i, d in ipairs(list) do
       clean[rel][i] =
@@ -320,14 +357,14 @@ local function save_drafts(root)
   vim.fn.writefile({ vim.json.encode(clean) }, path)
 end
 
---- Ensure M.drafts is the on-disk draft set for `root` (reloads on repo change).
----@param root string
+--- The draft set for `root` (rel -> list), loading it from disk on first touch.
+---@param root string normalized
+---@return table<string, table[]>
 local function ensure_drafts(root)
-  if M.drafts_root == root then
-    return
+  if not M.drafts[root] then
+    M.drafts[root] = load_drafts(root)
   end
-  M.drafts = load_drafts(root)
-  M.drafts_root = root
+  return M.drafts[root]
 end
 
 --- Add `abs` and every ancestor dir up to the repo root into `marked`.
@@ -347,25 +384,29 @@ local function mark_with_ancestors(marked, nroot, rel)
   end
 end
 
---- Rebuild M.marked (tree decorator set) from live comments and drafts.
+--- Rebuild one repo's slice of M.marked (tree decorator set) from its live
+--- comments and drafts, leaving other repos' entries alone.
 ---@param root string
 function M.rebuild_marked(root)
-  local marked = {}
   local nroot = vim.fs.normalize(root)
-  for rel, list in pairs(M.by_path) do
+  for abs in pairs(M.marked) do
+    if under(abs, nroot) then
+      M.marked[abs] = nil
+    end
+  end
+  for rel, list in pairs(M.by_path[nroot] or {}) do
     for _, c in ipairs(list) do
       if comment_visible(c) then
-        mark_with_ancestors(marked, nroot, rel)
+        mark_with_ancestors(M.marked, nroot, rel)
         break
       end
     end
   end
-  for rel, list in pairs(M.drafts) do
+  for rel, list in pairs(M.drafts[nroot] or {}) do
     if #list > 0 then
-      mark_with_ancestors(marked, nroot, rel)
+      mark_with_ancestors(M.marked, nroot, rel)
     end
   end
-  M.marked = marked
 end
 
 local function persist_drafts(root)
@@ -375,18 +416,18 @@ end
 
 -- ---------------------------------------------------------------------------
 
---- The open PR for the branch checked out in `root`. Returns {number, head} or
---- nil (no PR, or the user dismissed the picker). Prompts once when a branch has
---- several open PRs and remembers the choice.
+--- The open PR for the branch checked out in `root`. Returns {number} or nil (no
+--- PR, or the user dismissed the picker). Prompts once when a branch has several
+--- open PRs and remembers the choice.
 ---@param root string
----@return { number: integer, head: string }?
+---@return { number: integer }?
 local function resolve_pr(root)
   local branch = vim.trim(sh({ "git", "-C", root, "branch", "--show-current" }).stdout or "")
   if branch == "" then
     return nil
   end
   local prs = gh_json(
-    { "pr", "list", "--head", branch, "--state", "open", "--json", "number,headRefOid,title" },
+    { "pr", "list", "--head", branch, "--state", "open", "--json", "number,title" },
     root
   )
   if not prs or #prs == 0 then
@@ -396,7 +437,7 @@ local function resolve_pr(root)
   local chosen
   if #prs == 1 then
     chosen = prs[1]
-  elseif M.pr_choice and M.pr_choice.branch == branch then
+  elseif M.pr_choice and M.pr_choice.root == root and M.pr_choice.branch == branch then
     for _, pr in ipairs(prs) do
       if pr.number == M.pr_choice.number then
         chosen = pr
@@ -413,9 +454,9 @@ local function resolve_pr(root)
       return nil
     end
     chosen = prs[idx]
-    M.pr_choice = { branch = branch, number = chosen.number }
+    M.pr_choice = { root = root, branch = branch, number = chosen.number }
   end
-  return { number = chosen.number, head = chosen.headRefOid }
+  return { number = chosen.number }
 end
 
 --- Join the branch PR's review threads (GraphQL) back onto the REST comments,
@@ -609,7 +650,7 @@ end
 ---@param rel string
 ---@param root string
 local function sync_draft_positions(buf, rel, root)
-  local drafts = M.drafts[rel]
+  local drafts = ensure_drafts(root)[rel]
   if not drafts or #drafts == 0 then
     return
   end
@@ -654,18 +695,19 @@ end
 ---@param buf integer
 ---@return table<integer, table[]>?
 local function buf_by_line(buf)
-  if not M.shown or not M.root then
+  -- Scoped to the buffer's own repo: only its comments render here, and only
+  -- while that repo's review is shown — another tab's review doesn't leak in.
+  local root = buf_root(buf)
+  if not root or not M.shown_roots[root] then
     return nil
   end
-  local rel = rel_of(buf, M.root)
+  local rel = rel_of(buf, root)
   if not rel then
     return nil
   end
-  if M.drafts_root == M.root then
-    sync_draft_positions(buf, rel, M.root)
-  end
-  local live = M.by_path[rel]
-  local drafts = M.drafts_root == M.root and M.drafts[rel] or nil
+  sync_draft_positions(buf, rel, root)
+  local live = (M.by_path[root] or {})[rel]
+  local drafts = ensure_drafts(root)[rel]
   if not live and not drafts then
     return nil
   end
@@ -839,10 +881,10 @@ end
 --- grows. A read that fails (commit not fetched locally) is cached as false so we
 --- don't retry it and the remap falls back to GitHub's line. MUST run in a
 --- coroutine (uses sh).
----@param root string
+---@param root string normalized
 local function fetch_base_blobs(root)
   local want = {}
-  for _, list in pairs(M.by_path) do
+  for _, list in pairs(M.by_path[root] or {}) do
     for _, c in ipairs(list) do
       local sha, path = c.commit_id, c.path
       if val(c.line) ~= nil and sha and path then
@@ -858,11 +900,12 @@ local function fetch_base_blobs(root)
   end
 end
 
---- Fetch the branch PR's line comments and (re)draw every loaded buffer. Drafts
---- are local, so they load and render even when the branch has no PR yet.
-local function fetch_render()
+--- Fetch one repo's branch-PR line comments and (re)draw every loaded buffer.
+--- Drafts are local, so they load and render even when the branch has no PR yet.
+---@param root string? normalized repo root; defaults to the current buffer's
+local function fetch_render(root)
   run(function()
-    local root = current_root()
+    root = root or current_root()
     if not root then
       return
     end
@@ -882,7 +925,7 @@ local function fetch_render()
       end
       if not comments then
         vim.notify("review: couldn't fetch comments: " .. tostring(err), vim.log.levels.WARN)
-        M.by_path = {}
+        M.by_path[root] = nil
       else
         local resolved, thread_of = review_threads(root, pr.number)
         local by_path = {}
@@ -896,11 +939,11 @@ local function fetch_render()
             table.insert(by_path[c.path], c)
           end
         end
-        M.by_path = by_path
+        M.by_path[root] = by_path
         fetch_base_blobs(root)
       end
     else
-      M.by_path = {} -- no PR for this branch: only drafts show
+      M.by_path[root] = nil -- no PR for this branch: only drafts show
     end
 
     -- Render now with whatever author names are already cached — the lookups
@@ -913,7 +956,7 @@ local function fetch_render()
     -- inline headers read "Name - @login" rather than a bare handle; redraw
     -- only if the lookups actually learned something new.
     local logins = {}
-    for _, list in pairs(M.by_path) do
+    for _, list in pairs(M.by_path[root] or {}) do
       for _, c in ipairs(list) do
         if c.user and c.user.login and M.names[c.user.login] == nil then
           logins[c.user.login] = true
@@ -928,14 +971,23 @@ local function fetch_render()
 end
 
 --- Whether a file or folder has PR comments or drafts (for the tree decorator).
---- False while comments are hidden.
+--- False while its repo's comments are hidden.
 ---@param abs string?
 ---@return boolean
 function M.has_comments(abs)
-  if not M.shown or not abs then
+  if not abs then
     return false
   end
-  return M.marked[vim.fs.normalize(abs)] == true
+  abs = vim.fs.normalize(abs)
+  if M.marked[abs] ~= true then
+    return false
+  end
+  for root in pairs(M.shown_roots) do
+    if under(abs, root) then
+      return true
+    end
+  end
+  return false
 end
 
 --- Queue a draft comment on the current file. `end_line` is the anchor line;
@@ -954,12 +1006,12 @@ function M.comment(start_line, end_line)
     vim.notify("review: this buffer isn't a file in the repo", vim.log.levels.WARN)
     return
   end
-  ensure_drafts(root)
+  local drafts = ensure_drafts(root)
 
   local title = ("Draft comment on %s:%d"):format(vim.fs.basename(rel), end_line)
   open_input(title, nil, function(body, close)
-    M.drafts[rel] = M.drafts[rel] or {}
-    table.insert(M.drafts[rel], {
+    drafts[rel] = drafts[rel] or {}
+    table.insert(drafts[rel], {
       line = end_line,
       side = "RIGHT",
       start_line = (start_line and start_line < end_line) and start_line or nil,
@@ -978,13 +1030,13 @@ function M.discard_draft()
   if not root then
     return
   end
-  ensure_drafts(root)
+  local drafts = ensure_drafts(root)
   local rel = rel_of(vim.api.nvim_get_current_buf(), root)
   if not rel then
     return
   end
   local line = vim.fn.line(".")
-  local list = M.drafts[rel] or {}
+  local list = drafts[rel] or {}
   local hits = {}
   for i, d in ipairs(list) do
     if d.line == line then
@@ -999,7 +1051,7 @@ function M.discard_draft()
   local function remove(i)
     table.remove(list, i)
     if #list == 0 then
-      M.drafts[rel] = nil
+      drafts[rel] = nil
     end
     persist_drafts(root)
     render_all()
@@ -1112,7 +1164,7 @@ function M.edit()
   if not root then
     return
   end
-  ensure_drafts(root)
+  local drafts = ensure_drafts(root)
   local rel = rel_of(vim.api.nvim_get_current_buf(), root)
   if not rel then
     return
@@ -1125,7 +1177,7 @@ function M.edit()
   local live_thread = thread_at_cursor() or {}
 
   local draft_hits = {}
-  for _, d in ipairs(M.drafts[rel] or {}) do
+  for _, d in ipairs(drafts[rel] or {}) do
     if d.line == line then
       draft_hits[#draft_hits + 1] = d
     end
@@ -1295,12 +1347,13 @@ end
 --- override via opts.yank_register.
 function M.yank_drafts()
   local root = current_root()
-  if root then
-    ensure_drafts(root)
+  if not root then
+    vim.notify("review: not in a git repo", vim.log.levels.WARN)
+    return
   end
 
   local entries = {}
-  for rel, list in pairs(M.drafts) do
+  for rel, list in pairs(ensure_drafts(root)) do
     for _, d in ipairs(list) do
       entries[#entries + 1] = { path = rel, line = d.line, body = d.body }
     end
@@ -1327,10 +1380,10 @@ function M.submit()
     vim.notify("review: not in a git repo", vim.log.levels.WARN)
     return
   end
-  ensure_drafts(root)
+  local drafts = ensure_drafts(root)
 
   local draft_count = 0
-  for _, list in pairs(M.drafts) do
+  for _, list in pairs(drafts) do
     draft_count = draft_count + #list
   end
   run(function()
@@ -1370,7 +1423,7 @@ function M.submit()
     -- and let GitHub arbitrate, the pre-change behaviour.
     local diff_lines = pr_diff_lines(root, pr.number)
     local inline, offdiff = {}, {}
-    for rel, list in pairs(M.drafts) do
+    for rel, list in pairs(drafts) do
       for _, d in ipairs(list) do
         local side = d.side or "RIGHT"
         local set = diff_lines
@@ -1416,14 +1469,15 @@ function M.submit()
     )
     open_input(title, nil, function(body, close)
       run(function()
-        -- Anchor to the local HEAD, not the PR's headRefOid: the drafts were
+        -- Anchor to the local HEAD, never the PR's remote head: the drafts were
         -- placed against the working copy, so if the remote branch has moved on
-        -- since the last fetch, pr.head points at content the line numbers no
-        -- longer describe. HEAD must be pushed and part of the PR for GitHub to
-        -- accept it; when it isn't, the submit 422s and the drafts survive for
-        -- M.yank_drafts. Falls back to pr.head only if rev-parse gives nothing.
+        -- since the last fetch, the remote head points at content these line
+        -- numbers no longer describe. HEAD must be pushed and part of the PR for
+        -- GitHub to accept it; when it isn't, the submit 422s and the drafts
+        -- survive for M.yank_drafts. That's the intended recovery — submitting
+        -- against a commit we didn't review would be the worse outcome.
         local head = vim.trim(sh({ "git", "-C", root, "rev-parse", "HEAD" }).stdout or "")
-        local payload = { commit_id = (head ~= "" and head) or pr.head, event = verdict }
+        local payload = { commit_id = head, event = verdict }
         if #inline > 0 then
           payload.comments = inline
         end
@@ -1454,7 +1508,7 @@ function M.submit()
         if obj.code == 0 then
           -- Success means every draft landed (inline or folded) — clear them all.
           close()
-          M.drafts = {}
+          M.drafts[root] = {}
           save_drafts(root)
           vim.notify(
             ("review: submitted %s (%d inline, %d folded)"):format(verdict, #inline, #offdiff)
@@ -1469,16 +1523,27 @@ function M.submit()
   end)
 end
 
---- Show or hide inline comments. Showing fetches from GitHub; hiding just clears.
+--- Show or hide one repo's inline comments (default: the cwd's repo, matching
+--- how triage scopes its toggle). Showing fetches from GitHub; hiding just
+--- clears that repo's rendering — other repos' reviews are untouched.
 ---@param on boolean
-function M.set_shown(on)
-  M.shown = on
+---@param root string? repo root; defaults to the cwd's
+function M.set_shown(on, root)
+  root = root and vim.fs.normalize(root) or cwd_root()
+  if not root then
+    return
+  end
+  M.shown_roots[root] = on or nil
   if on then
-    fetch_render()
+    fetch_render(root)
   else
-    M.marked = {}
+    for abs in pairs(M.marked) do
+      if under(abs, root) then
+        M.marked[abs] = nil
+      end
+    end
     for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_loaded(buf) then
+      if vim.api.nvim_buf_is_loaded(buf) and buf_root(buf) == root then
         vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
       end
     end
@@ -1486,17 +1551,18 @@ function M.set_shown(on)
   end
 end
 
---- Re-fetch from GitHub and redraw (manual refresh).
+--- Re-fetch the current repo's comments from GitHub and redraw (manual refresh).
 function M.refresh()
-  if M.shown then
-    fetch_render()
+  local root = current_root()
+  if root and M.shown_roots[root] then
+    fetch_render(root)
   end
 end
 
 --- Re-mark and redraw from the caches after a visibility toggle (no network).
 local function redisplay()
-  if M.root then
-    M.rebuild_marked(M.root)
+  for root in pairs(M.shown_roots) do
+    M.rebuild_marked(root)
   end
   render_all()
 end
@@ -1536,7 +1602,8 @@ end
 --- (triage.nvim contributes the base separately; lualine concatenates the two.)
 ---@return string
 function M.statusline()
-  if not M.shown then
+  local root = cwd_root()
+  if not root or not M.shown_roots[root] then
     return ""
   end
   local bubble = "\xef\x81\xb5" -- U+F075 nerd-font speech bubble (fa-comment)
@@ -1649,9 +1716,11 @@ function M.setup(opts)
   set_hl()
 
   -- Draw cached comments on buffers as they load/show (cheap; no network).
+  -- Gated on any repo being shown; render_buf itself scopes to the buffer's
+  -- repo, so a buffer from a hidden repo just gets cleared.
   vim.api.nvim_create_autocmd({ "BufReadPost", "BufWinEnter" }, {
     callback = function(a)
-      if M.shown then
+      if next(M.shown_roots) then
         render_buf(a.buf)
       end
     end,
@@ -1663,7 +1732,7 @@ function M.setup(opts)
   -- diffing on every keystroke; render_buf no-ops on buffers without comments.
   vim.api.nvim_create_autocmd({ "TextChanged", "InsertLeave" }, {
     callback = function(a)
-      if M.shown then
+      if next(M.shown_roots) then
         render_buf(a.buf)
       end
     end,
