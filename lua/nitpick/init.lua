@@ -1416,7 +1416,14 @@ function M.submit()
     )
     open_input(title, nil, function(body, close)
       run(function()
-        local payload = { commit_id = pr.head, event = verdict }
+        -- Anchor to the local HEAD, not the PR's headRefOid: the drafts were
+        -- placed against the working copy, so if the remote branch has moved on
+        -- since the last fetch, pr.head points at content the line numbers no
+        -- longer describe. HEAD must be pushed and part of the PR for GitHub to
+        -- accept it; when it isn't, the submit 422s and the drafts survive for
+        -- M.yank_drafts. Falls back to pr.head only if rev-parse gives nothing.
+        local head = vim.trim(sh({ "git", "-C", root, "rev-parse", "HEAD" }).stdout or "")
+        local payload = { commit_id = (head ~= "" and head) or pr.head, event = verdict }
         if #inline > 0 then
           payload.comments = inline
         end
