@@ -20,7 +20,7 @@ describe("comments.rebuild_marked", function()
   -- The decorator paints directories too, so an icon on a nested file has to
   -- propagate up every ancestor for the collapsed tree to show it.
   it("marks a commented file and every ancestor up to the root", function()
-    comments.by_path = { ["src/a/b.lua"] = { { line = 1 } } }
+    comments.by_path = { ["/repo"] = { ["src/a/b.lua"] = { { line = 1 } } } }
     comments.rebuild_marked("/repo")
 
     assert.same({
@@ -32,14 +32,14 @@ describe("comments.rebuild_marked", function()
   end)
 
   it("marks a file at the repo root", function()
-    comments.by_path = { ["README.md"] = { { line = 1 } } }
+    comments.by_path = { ["/repo"] = { ["README.md"] = { { line = 1 } } } }
     comments.rebuild_marked("/repo")
 
     assert.same({ ["/repo"] = true, ["/repo/README.md"] = true }, comments.marked)
   end)
 
   it("marks drafts as well as live comments", function()
-    comments.drafts = { ["src/draft.lua"] = { { line = 2, body = "hi" } } }
+    comments.drafts = { ["/repo"] = { ["src/draft.lua"] = { { line = 2, body = "hi" } } } }
     comments.rebuild_marked("/repo")
 
     assert.is_true(comments.marked["/repo/src/draft.lua"])
@@ -49,15 +49,15 @@ describe("comments.rebuild_marked", function()
   -- Discarding the last draft on a file leaves an empty list behind rather than
   -- removing the key; that file must stop being marked.
   it("ignores a file whose draft list is empty", function()
-    comments.drafts = { ["src/empty.lua"] = {} }
+    comments.drafts = { ["/repo"] = { ["src/empty.lua"] = {} } }
     comments.rebuild_marked("/repo")
 
     assert.same({}, comments.marked)
   end)
 
   it("unions live comments and drafts", function()
-    comments.by_path = { ["src/live.lua"] = { { line = 1 } } }
-    comments.drafts = { ["docs/draft.md"] = { { line = 1, body = "hi" } } }
+    comments.by_path = { ["/repo"] = { ["src/live.lua"] = { { line = 1 } } } }
+    comments.drafts = { ["/repo"] = { ["docs/draft.md"] = { { line = 1, body = "hi" } } } }
     comments.rebuild_marked("/repo")
 
     assert.is_true(comments.marked["/repo/src/live.lua"])
@@ -66,19 +66,35 @@ describe("comments.rebuild_marked", function()
   end)
 
   it("replaces the previous set rather than accumulating", function()
-    comments.by_path = { ["gone.lua"] = { { line = 1 } } }
+    comments.by_path = { ["/repo"] = { ["gone.lua"] = { { line = 1 } } } }
     comments.rebuild_marked("/repo")
     assert.is_true(comments.marked["/repo/gone.lua"])
 
-    comments.by_path = { ["kept.lua"] = { { line = 1 } } }
+    comments.by_path = { ["/repo"] = { ["kept.lua"] = { { line = 1 } } } }
     comments.rebuild_marked("/repo")
 
     assert.is_nil(comments.marked["/repo/gone.lua"])
     assert.is_true(comments.marked["/repo/kept.lua"])
   end)
 
+  -- Reviews are per repo: rebuilding one repo's slice must not drop another
+  -- repo's marks (both can be shown at once, one per workspace tab).
+  it("leaves another repo's marks alone", function()
+    comments.by_path = {
+      ["/repo"] = { ["a.lua"] = { { line = 1 } } },
+      ["/other"] = { ["b.lua"] = { { line = 1 } } },
+    }
+    comments.rebuild_marked("/other")
+    comments.by_path["/repo"] = { ["kept.lua"] = { { line = 1 } } }
+    comments.rebuild_marked("/repo")
+
+    assert.is_true(comments.marked["/other/b.lua"])
+    assert.is_true(comments.marked["/repo/kept.lua"])
+    assert.is_nil(comments.marked["/repo/a.lua"])
+  end)
+
   it("normalizes a root given with a trailing slash", function()
-    comments.by_path = { ["a.lua"] = { { line = 1 } } }
+    comments.by_path = { ["/repo"] = { ["a.lua"] = { { line = 1 } } } }
     comments.rebuild_marked("/repo/")
 
     assert.is_true(comments.marked["/repo/a.lua"])
