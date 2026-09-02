@@ -554,15 +554,24 @@ local function author_chunks(login)
   return { { "@" .. login, "ReviewCommentAuthor" } }
 end
 
---- A scratch float to compose text. Calls on_submit(body, close) on <C-s>.
+--- A scratch window to compose text. Calls on_submit(body, close) on <C-s>.
 --- `initial` prefills it (and skips insert mode, e.g. when editing). By default
 --- an empty body cancels (closes without submitting); `allow_empty` lets an
 --- empty body through instead (the review summary is optional, so <C-s> on an
---- empty float still submits).
+--- empty compose window still submits).
+---
+--- Opens as a short split directly below the current window rather than a
+--- float: nothing gets covered, and moving between the code and the compose
+--- area is ordinary <C-w>j/k — a float needs mouse or <C-w>w gymnastics, and
+--- copying context into the comment is a two-window workflow. Splitting the
+--- current window (not the top level) keeps the box under the buffer it
+--- comments on, and keeps it out of the way of edge-panel managers like edgy.
 ---@param title string
 ---@param initial string[]?
 ---@param on_submit fun(body: string, close: fun())
 ---@param allow_empty boolean?
+local COMPOSE_HEIGHT = 8
+
 local function open_input(title, initial, on_submit, allow_empty)
   local input = vim.api.nvim_create_buf(false, true)
   vim.bo[input].filetype = "markdown"
@@ -570,21 +579,18 @@ local function open_input(title, initial, on_submit, allow_empty)
   if initial and #initial > 0 then
     vim.api.nvim_buf_set_lines(input, 0, -1, false, initial)
   end
-  local width = math.min(80, vim.o.columns - 4)
   local win = vim.api.nvim_open_win(input, true, {
-    relative = "editor",
-    width = width,
-    height = 8,
-    row = math.max(0, vim.o.lines - 11), -- clamp: keeps the float on short screens
-    col = math.floor((vim.o.columns - width) / 2),
-    border = "rounded",
-    title = (" %s  ·  <C-s> send  ·  q cancel "):format(title),
-    style = "minimal",
+    split = "below",
+    win = 0,
+    height = COMPOSE_HEIGHT,
   })
-  -- Match the compose area to the normal editor background (rather than the
-  -- theme's NormalFloat, which is often a different, jarring shade), and wrap
-  -- for comfortable prose.
-  vim.wo[win].winhighlight = "NormalFloat:Normal,FloatBorder:Comment,FloatTitle:Title"
+  -- The float's title moves to a winbar; escape %, it's a statusline format.
+  vim.wo[win].winbar = ("%%#Title# %s %%#Comment# · <C-s> send · q cancel "):format(
+    title:gsub("%%", "%%%%")
+  )
+  vim.wo[win].number = false
+  vim.wo[win].relativenumber = false
+  vim.wo[win].signcolumn = "no"
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
 
@@ -1667,6 +1673,164 @@ function M.jump_comment(dir)
   vim.cmd("normal! zz")
 end
 
+-- Highlights for the overview window's header/meta lines.
+local ns_overview = vim.api.nvim_create_namespace("review_overview")
+
+--- Flatten one repo's cached live comments (respecting the visibility toggles)
+--- and drafts into sorted entries for the overview: path, anchor line, kind,
+--- author, body, and display tags. Pure over the caches — no network — so a
+--- stale view just means the last fetch is stale, same as the inline render.
+---@param root string normalized
+---@return { path: string, line: integer, kind: "live"|"draft", login: string?, body: string, tags: string[] }[]
+function M.overview_entries(root)
+  local entries = {}
+  for rel, list in pairs(M.by_path[root] or {}) do
+    for _, c in ipairs(list) do
+      if comment_visible(c) then
+        local tags = {}
+        if c.side == "LEFT" then
+          tags[#tags + 1] = "removed side"
+        end
+        if val(c.line) == nil then
+          tags[#tags + 1] = "outdated"
+        end
+        if c.resolved then
+          tags[#tags + 1] = "resolved"
+        end
+        entries[#entries + 1] = {
+          path = rel,
+          line = val(c.line) or val(c.original_line) or 1,
+          kind = "live",
+          login = c.user and c.user.login or nil,
+          body = c.body or "",
+          tags = tags,
+        }
+      end
+    end
+  end
+  for rel, list in pairs(ensure_drafts(root)) do
+    for _, d in ipairs(list) do
+      entries[#entries + 1] =
+        { path = rel, line = d.line, kind = "draft", body = d.body or "", tags = {} }
+    end
+  end
+  table.sort(entries, function(a, b)
+    if a.path ~= b.path then
+      return a.path < b.path
+    end
+    if a.line ~= b.line then
+      return a.line < b.line
+    end
+    if a.kind ~= b.kind then
+      return a.kind == "live" -- live before drafts, matching the inline stack
+    end
+    return false
+  end)
+  return entries
+end
+
+--- Every comment and draft for the current repo in one readable scratch window
+--- (a bottom split): full bodies grouped by file, <CR> jumps to the entry under
+--- the cursor, q closes. Reads the same caches the inline render does, so it's
+--- instant; refresh (<leader>rC) first if the PR has moved on.
+function M.overview()
+  local root = current_root()
+  if not root then
+    vim.notify("review: not in a git repo", vim.log.levels.WARN)
+    return
+  end
+  if not M.shown_roots[root] then
+    vim.notify("review: comments are hidden (turn review mode on first)", vim.log.levels.INFO)
+    return
+  end
+  local entries = M.overview_entries(root)
+  if #entries == 0 then
+    vim.notify("review: no comments or drafts", vim.log.levels.INFO)
+    return
+  end
+
+  -- Build the text, a row -> jump-target map (every row of an entry jumps to
+  -- it, so <CR> works from a body line too), and header-highlight rows.
+  local lines, jump, marks = {}, {}, {}
+  local function push(text, target, hl)
+    lines[#lines + 1] = text
+    jump[#lines] = target
+    if hl then
+      marks[#marks + 1] = { #lines - 1, hl }
+    end
+  end
+  local last_path
+  for _, e in ipairs(entries) do
+    local target = { path = e.path, line = e.line }
+    if e.path ~= last_path then
+      if last_path then
+        push("", nil)
+      end
+      push(e.path, target, "Title")
+      last_path = e.path
+    end
+    local who
+    if e.kind == "draft" then
+      who = "@you (draft, unsent)"
+    else
+      local name = e.login and M.names[e.login]
+      local handle = "@" .. (e.login or "?")
+      who = (name and name ~= "") and (name .. " - " .. handle) or handle
+    end
+    local tags = #e.tags > 0 and ("  (" .. table.concat(e.tags, ", ") .. ")") or ""
+    push(
+      ("  %d · %s%s"):format(e.line, who, tags),
+      target,
+      e.kind == "draft" and "ReviewCommentDraft" or "ReviewCommentAuthor"
+    )
+    for _, bl in ipairs(vim.split(e.body:gsub("\r", ""), "\n", { plain = true })) do
+      push("    " .. bl, target)
+    end
+  end
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].filetype = "nitpick"
+  for _, m in ipairs(marks) do
+    vim.api.nvim_buf_set_extmark(buf, ns_overview, m[1], 0, { line_hl_group = m[2] })
+  end
+
+  local prev = vim.api.nvim_get_current_win()
+  local height = math.min(#lines + 1, math.max(8, math.floor(vim.o.lines * 0.4)))
+  local win = vim.api.nvim_open_win(buf, true, { split = "below", win = 0, height = height })
+  vim.wo[win].winbar = ("%%#Title# PR comments · %d %%#Comment# · <CR> jump · q close "):format(
+    #entries
+  )
+  vim.wo[win].number = false
+  vim.wo[win].relativenumber = false
+  vim.wo[win].signcolumn = "no"
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
+  vim.wo[win].cursorline = true
+
+  vim.keymap.set("n", "q", function()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end, { buffer = buf, desc = "Close comment overview" })
+  vim.keymap.set("n", "<CR>", function()
+    local target = jump[vim.fn.line(".")]
+    if not target then
+      return
+    end
+    vim.api.nvim_win_close(win, true)
+    if vim.api.nvim_win_is_valid(prev) then
+      vim.api.nvim_set_current_win(prev)
+    end
+    vim.cmd.edit(vim.fn.fnameescape(root .. "/" .. target.path))
+    local last = vim.api.nvim_buf_line_count(0)
+    vim.api.nvim_win_set_cursor(0, { math.max(1, math.min(target.line, last)), 0 })
+    vim.cmd("normal! zz")
+  end, { buffer = buf, desc = "Jump to comment" })
+end
+
 -- Default keymaps, action -> left-hand side. Override or disable individually
 -- via opts.keys (set an action to false/"" to leave it unmapped). `comment` maps
 -- in both normal (line) and visual (range) mode on the one key.
@@ -1676,6 +1840,7 @@ local default_keys = {
   resolve = "<leader>rk",
   next = "]r",
   prev = "[r",
+  overview = "<leader>rl",
   edit = "<leader>re",
   discard = "<leader>rx",
   submit = "<leader>rS",
@@ -1764,6 +1929,7 @@ function M.setup(opts)
   mapk("prev", "n", function()
     M.jump_comment(-1)
   end, "Review: jump to previous PR comment")
+  mapk("overview", "n", M.overview, "Review: list all PR comments and drafts")
   mapk("edit", "n", M.edit, "Review: edit PR comment/draft on line")
   mapk("discard", "n", M.discard_draft, "Review: discard draft on line")
   mapk("submit", "n", M.submit, "Review: submit drafted review (batched)")
@@ -1791,6 +1957,11 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("ReviewPrevComment", function()
     M.jump_comment(-1)
   end, { desc = "Jump to the previous PR comment in this file" })
+  vim.api.nvim_create_user_command(
+    "ReviewOverview",
+    M.overview,
+    { desc = "List all PR comments and drafts for this repo" }
+  )
   vim.api.nvim_create_user_command(
     "ReviewEditComment",
     M.edit,

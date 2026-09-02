@@ -203,3 +203,89 @@ describe("nitpick.next_anchor", function()
     assert.is_nil(next_anchor({}, 5, 1))
   end)
 end)
+
+describe("comments.overview_entries", function()
+  before_each(function()
+    comments.by_path = {}
+    comments.drafts = {}
+    comments.show_outdated = true
+    comments.show_resolved = false
+  end)
+
+  it("is empty with no comments or drafts", function()
+    assert.same({}, comments.overview_entries("/repo"))
+  end)
+
+  it("sorts by path then line, live before drafts on the same line", function()
+    comments.by_path = {
+      ["/repo"] = {
+        ["b.lua"] = { { line = 5, body = "live5", user = { login = "alice" } } },
+        ["a.lua"] = { { line = 9, body = "live9", user = { login = "bob" } } },
+      },
+    }
+    comments.drafts = {
+      ["/repo"] = { ["b.lua"] = { { line = 5, body = "draft5" }, { line = 2, body = "draft2" } } },
+    }
+    local order = {}
+    for _, e in ipairs(comments.overview_entries("/repo")) do
+      order[#order + 1] = ("%s:%d:%s"):format(e.path, e.line, e.kind)
+    end
+    assert.same({ "a.lua:9:live", "b.lua:2:draft", "b.lua:5:live", "b.lua:5:draft" }, order)
+  end)
+
+  it("anchors an outdated comment on original_line and tags it", function()
+    comments.by_path = {
+      ["/repo"] = {
+        ["a.lua"] = {
+          { line = vim.NIL, original_line = 7, body = "old", user = { login = "alice" } },
+        },
+      },
+    }
+    local entries = comments.overview_entries("/repo")
+    assert.equal(7, entries[1].line)
+    assert.same({ "outdated" }, entries[1].tags)
+  end)
+
+  it("filters resolved comments per the visibility toggle", function()
+    comments.by_path = {
+      ["/repo"] = {
+        ["a.lua"] = { { line = 3, body = "done", resolved = true, user = { login = "alice" } } },
+      },
+    }
+    assert.same({}, comments.overview_entries("/repo"))
+    comments.show_resolved = true
+    local entries = comments.overview_entries("/repo")
+    assert.equal(1, #entries)
+    assert.same({ "resolved" }, entries[1].tags)
+  end)
+end)
+
+describe("comments.overview window", function()
+  -- The overview (like the compose box) opens as a split below the window it
+  -- was invoked from, so it stays under that buffer rather than spanning the
+  -- whole editor and disturbing edge panels.
+  it("opens below the current window", function()
+    local root = vim.fs.normalize(vim.fn.getcwd())
+    vim.cmd("only")
+    vim.cmd("edit " .. root .. "/lua/nitpick/init.lua")
+    local prev = vim.api.nvim_get_current_win()
+    comments.shown_roots[root] = true
+    comments.by_path = {
+      [root] = { ["a.lua"] = { { line = 3, body = "hi", user = { login = "alice" } } } },
+    }
+    comments.drafts = {}
+
+    comments.overview()
+
+    local win = vim.api.nvim_get_current_win()
+    local buf = vim.api.nvim_win_get_buf(win)
+    assert.equal("nitpick", vim.bo[buf].filetype)
+    -- A split below the window the overview was opened from, not top-level.
+    assert.equal("col", vim.fn.winlayout()[1])
+    assert.equal(prev, vim.fn.winlayout()[2][1][2])
+
+    vim.api.nvim_win_close(win, true)
+    comments.shown_roots[root] = nil
+    comments.by_path = {}
+  end)
+end)
