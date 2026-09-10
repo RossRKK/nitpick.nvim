@@ -64,3 +64,45 @@ describe("current_branch", function()
     assert.equals("", run(function() return nitpick.current_branch(root) end))
   end)
 end)
+
+describe("repo_root", function()
+  local root
+  local env = { JJ_USER = "t", JJ_EMAIL = "t@t", JJ_CONFIG = "/dev/null" }
+  local function jj(cwd, args)
+    local obj = vim.system(vim.list_extend({ "jj" }, args), { cwd = cwd, text = true, env = env }):wait()
+    assert.equals(0, obj.code, table.concat(args, " ") .. "\n" .. (obj.stderr or ""))
+  end
+  before_each(function()
+    root = vim.fn.tempname()
+    vim.fn.mkdir(root, "p")
+    vim.system({ "git", "init", "-q", "-b", "main" }, { cwd = root }):wait()
+    jj(root, { "git", "init", "--colocate" })
+  end)
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  -- A secondary workspace lives under the main one here, like ionics/.worktrees,
+  -- and has a .jj but no .git. It must be its own root, not the main checkout.
+  it("stops at a secondary jj workspace nested inside the main one", function()
+    local ws = root .. "/.worktrees/feat"
+    vim.fn.mkdir(root .. "/.worktrees", "p")
+    jj(root, { "workspace", "add", ws })
+    vim.fn.mkdir(ws .. "/src", "p")
+    vim.fn.writefile({ "" }, ws .. "/src/a.lua")
+
+    assert.equals(vim.fs.normalize(ws), nitpick.repo_root(ws .. "/src/a.lua"))
+    assert.equals(vim.fs.normalize(root), nitpick.repo_root(root .. "/README"))
+  end)
+
+  it("resolves the branch of the secondary workspace, not the main one", function()
+    local ws = root .. "/.worktrees/feat"
+    jj(root, { "commit", "-m", "base" })
+    jj(root, { "bookmark", "create", "main-side", "-r", "@-" })
+    vim.fn.mkdir(root .. "/.worktrees", "p")
+    jj(root, { "workspace", "add", ws })
+    jj(ws, { "bookmark", "create", "feat/ws", "-r", "@-" })
+
+    assert.equals("feat/ws", run(function() return nitpick.current_branch(nitpick.repo_root(ws)) end))
+  end)
+end)

@@ -233,11 +233,24 @@ local function pick(items, opts)
   return coroutine.yield()
 end
 
+--- Markers that make a directory a repo root. `.jj` comes first in spirit, not
+--- in precedence: vim.fs.root takes the nearest directory holding any marker.
+--- A secondary jj workspace has a `.jj` but no `.git`; matching only `.git`
+--- would walk up to the main workspace and read its branch instead.
+M.root_markers = { ".jj", ".git" }
+
+--- Normalized repo toplevel containing `path` (a path or buffer number), or nil.
+---@param path string|integer
+---@return string?
+function M.repo_root(path)
+  local root = vim.fs.root(path, M.root_markers)
+  return root and vim.fs.normalize(root) or nil
+end
+
 --- Normalized repo toplevel for the current buffer. nil outside a repo.
 ---@return string?
 local function current_root()
-  local root = vim.fs.root(0, ".git")
-  return root and vim.fs.normalize(root) or nil
+  return M.repo_root(0)
 end
 
 --- Normalized repo toplevel containing a buffer's file, or nil. Unnamed buffers
@@ -250,8 +263,7 @@ local function buf_root(buf)
   if name == "" then
     return nil
   end
-  local root = vim.fs.root(name, ".git")
-  return root and vim.fs.normalize(root) or nil
+  return M.repo_root(name)
 end
 
 --- Normalized repo root containing the cwd, or nil. The toggle/statusline
@@ -259,8 +271,7 @@ end
 --- the same thing to both plugins.
 ---@return string?
 local function cwd_root()
-  local root = vim.fs.root(vim.fn.getcwd(), ".git")
-  return root and vim.fs.normalize(root) or nil
+  return M.repo_root(vim.fn.getcwd())
 end
 
 --- Is `path` equal to or under `root` (both normalized)?
