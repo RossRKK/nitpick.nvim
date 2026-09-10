@@ -416,13 +416,49 @@ end
 
 -- ---------------------------------------------------------------------------
 
+--- First non-empty line of jj's bookmark listing, or "" when there is none.
+---@param stdout string
+---@return string
+function M.first_bookmark(stdout)
+  for line in (stdout or ""):gmatch("[^\n]+") do
+    line = vim.trim(line)
+    if line ~= "" then
+      return line
+    end
+  end
+  return ""
+end
+
+--- The branch name GitHub knows this checkout by. Under git that is the
+--- checked-out branch. In a colocated jj repo HEAD is always detached, so ask jj
+--- for the nearest bookmark at or below `@` instead: the working copy is usually
+--- an empty, unbookmarked change on top of the pushed one. Runs with
+--- --ignore-working-copy so a background lookup never snapshots the files.
+--- Returns "" when nothing names the checkout. Must run inside a coroutine.
+---@param root string
+---@return string
+function M.current_branch(root)
+  if vim.uv.fs_stat(root .. "/.jj") then
+    local obj = sh({
+      "jj", "--ignore-working-copy", "--color=never", "--no-pager", "-R", root,
+      "log", "--no-graph", "-r", "heads(::@ & bookmarks())",
+      "-T", 'local_bookmarks.map(|b| b.name()).join("\n") ++ "\n"',
+    })
+    if obj.code ~= 0 then
+      return ""
+    end
+    return M.first_bookmark(obj.stdout)
+  end
+  return vim.trim(sh({ "git", "-C", root, "branch", "--show-current" }).stdout or "")
+end
+
 --- The open PR for the branch checked out in `root`. Returns {number} or nil (no
 --- PR, or the user dismissed the picker). Prompts once when a branch has several
 --- open PRs and remembers the choice.
 ---@param root string
 ---@return { number: integer }?
 local function resolve_pr(root)
-  local branch = vim.trim(sh({ "git", "-C", root, "branch", "--show-current" }).stdout or "")
+  local branch = M.current_branch(root)
   if branch == "" then
     return nil
   end
