@@ -177,6 +177,31 @@ local function gh_json(args, cwd)
   return decoded
 end
 
+--- One line for a GitHub API error body. The `message` alone is useless for a
+--- 422 ("Unprocessable Entity"); the reason lives in `errors`, each either a
+--- string or an object with its own message/field/code. Those are appended
+--- after a colon, joined by "; ".
+---@param decoded { message: string, errors: any[]? }
+---@return string
+function M.api_error_text(decoded)
+  local parts = {}
+  for _, e in ipairs(type(decoded.errors) == "table" and decoded.errors or {}) do
+    if type(e) == "string" then
+      parts[#parts + 1] = e
+    elseif type(e) == "table" then
+      local text = e.message or e.code or vim.inspect(e)
+      if e.field then
+        text = e.field .. ": " .. text
+      end
+      parts[#parts + 1] = text
+    end
+  end
+  if #parts == 0 then
+    return decoded.message
+  end
+  return decoded.message .. ": " .. table.concat(parts, "; ")
+end
+
 --- A short, single-line summary of a failed gh call, safe to notify without
 --- tripping the "Press ENTER to continue" prompt. Prefers the API error's
 --- "message" field when the body is JSON; otherwise collapses stderr/stdout to
@@ -188,7 +213,7 @@ local function gh_error(obj)
     if s and s ~= "" then
       local ok, decoded = pcall(vim.json.decode, s)
       if ok and type(decoded) == "table" and type(decoded.message) == "string" then
-        return decoded.message
+        return M.api_error_text(decoded)
       end
     end
   end
