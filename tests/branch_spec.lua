@@ -106,3 +106,56 @@ describe("repo_root", function()
     assert.equals("feat/ws", run(function() return nitpick.current_branch(nitpick.repo_root(ws)) end))
   end)
 end)
+
+describe("head_commit", function()
+  local root
+  local env = { JJ_USER = "t", JJ_EMAIL = "t@t", JJ_CONFIG = "/dev/null" }
+  local function jj(cwd, args)
+    local obj = vim.system(vim.list_extend({ "jj" }, args), { cwd = cwd, text = true, env = env }):wait()
+    assert.equals(0, obj.code, table.concat(args, " ") .. "\n" .. (obj.stderr or ""))
+    return vim.trim(obj.stdout)
+  end
+  local function git(cwd, args)
+    local obj = vim.system(vim.list_extend({ "git", "-C", cwd }, args), { text = true }):wait()
+    assert.equals(0, obj.code, table.concat(args, " ") .. "\n" .. (obj.stderr or ""))
+    return vim.trim(obj.stdout)
+  end
+  before_each(function()
+    root = vim.fn.tempname()
+    vim.fn.mkdir(root, "p")
+    git(root, { "init", "-q", "-b", "main" })
+    git(root, { "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init" })
+  end)
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("is HEAD in a plain git repo", function()
+    assert.equals(git(root, { "rev-parse", "HEAD" }), run(function() return nitpick.head_commit(root) end))
+  end)
+
+  it("is the parent of an empty @ in a jj repo", function()
+    jj(root, { "git", "init", "--colocate" })
+    local parent = jj(root, { "log", "--no-graph", "-r", "@-", "-T", "commit_id" })
+    assert.equals(parent, run(function() return nitpick.head_commit(root) end))
+  end)
+
+  it("is @ itself when @ has changes", function()
+    jj(root, { "git", "init", "--colocate" })
+    vim.fn.writefile({ "x" }, root .. "/a.txt")
+    jj(root, { "status" }) -- snapshot the working copy
+    local at = jj(root, { "log", "--no-graph", "-r", "@", "-T", "commit_id" })
+    assert.equals(at, run(function() return nitpick.head_commit(root) end))
+  end)
+
+  -- The motivating case: a secondary workspace has .jj but no .git, so
+  -- `git rev-parse HEAD` cannot run there.
+  it("resolves inside a secondary jj workspace without .git", function()
+    jj(root, { "git", "init", "--colocate" })
+    local ws = root .. "/.worktrees/feat"
+    vim.fn.mkdir(root .. "/.worktrees", "p")
+    jj(root, { "workspace", "add", ws })
+    local parent = jj(ws, { "log", "--no-graph", "-r", "@-", "-T", "commit_id" })
+    assert.equals(parent, run(function() return nitpick.head_commit(nitpick.repo_root(ws)) end))
+  end)
+end)

@@ -463,6 +463,31 @@ function M.current_branch(root)
   return vim.trim(sh({ "git", "-C", root, "branch", "--show-current" }).stdout or "")
 end
 
+--- The commit a submitted review is anchored to: what the drafts were placed
+--- against. Under git that is HEAD. In a jj workspace ask jj instead -- a
+--- secondary workspace has no .git, so git cannot answer there at all. The
+--- working copy `@` is usually an empty change on top of the pushed one, so an
+--- empty `@` resolves to its parent; a non-empty `@` is the content the drafts
+--- describe and is returned as-is (GitHub then 422s until it is pushed, which is
+--- the intended recovery -- see M.submit). Returns "" when nothing resolves.
+--- Must run inside a coroutine.
+---@param root string
+---@return string
+function M.head_commit(root)
+  if vim.uv.fs_stat(root .. "/.jj") then
+    local obj = sh({
+      "jj", "--ignore-working-copy", "--color=never", "--no-pager", "-R", root,
+      "log", "--no-graph", "-r", "@",
+      "-T", 'if(empty, parents.map(|c| c.commit_id()).join(""), commit_id)',
+    })
+    if obj.code ~= 0 then
+      return ""
+    end
+    return vim.trim(obj.stdout or "")
+  end
+  return vim.trim(sh({ "git", "-C", root, "rev-parse", "HEAD" }).stdout or "")
+end
+
 --- The open PR for the branch checked out in `root`. Returns {number} or nil (no
 --- PR, or the user dismissed the picker). Prompts once when a branch has several
 --- open PRs and remembers the choice.
@@ -1522,14 +1547,19 @@ function M.submit()
     )
     open_input(title, nil, function(body, close)
       run(function()
-        -- Anchor to the local HEAD, never the PR's remote head: the drafts were
-        -- placed against the working copy, so if the remote branch has moved on
-        -- since the last fetch, the remote head points at content these line
-        -- numbers no longer describe. HEAD must be pushed and part of the PR for
-        -- GitHub to accept it; when it isn't, the submit 422s and the drafts
-        -- survive for M.yank_drafts. That's the intended recovery — submitting
-        -- against a commit we didn't review would be the worse outcome.
-        local head = vim.trim(sh({ "git", "-C", root, "rev-parse", "HEAD" }).stdout or "")
+        -- Anchor to the local checkout (M.head_commit), never the PR's remote
+        -- head: the drafts were placed against the working copy, so if the
+        -- remote branch has moved on since the last fetch, the remote head
+        -- points at content these line numbers no longer describe. The commit
+        -- must be pushed and part of the PR for GitHub to accept it; when it
+        -- isn't, the submit 422s and the drafts survive for M.yank_drafts.
+        -- That's the intended recovery — submitting against a commit we didn't
+        -- review would be the worse outcome.
+        local head = M.head_commit(root)
+        if head == "" then
+          vim.notify("review: submit failed: cannot resolve the local commit", vim.log.levels.ERROR)
+          return
+        end
         local payload = { commit_id = head, event = verdict }
         if #inline > 0 then
           payload.comments = inline
