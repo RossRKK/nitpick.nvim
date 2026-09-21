@@ -669,6 +669,28 @@ end
 ---@param allow_empty boolean?
 local COMPOSE_HEIGHT = 8
 
+--- Run fn with 'splitkeep' forced to "cursor". With splitkeep=screen (set by
+--- edge-panel managers such as edgy so the middle windows don't jump when a
+--- panel opens) Neovim keeps the TEXT on the same screen rows when a window
+--- shrinks or grows, and moves the CURSOR when it would fall off the edge --
+--- so opening the compose split under a cursor in the bottom rows drags the
+--- cursor up, away from the line being commented on, and it never comes back.
+--- "cursor" keeps the cursor line and scrolls the text instead, which is what
+--- a box that comments on the cursor line needs.
+---@generic T
+---@param fn fun(): T
+---@return T
+local function with_cursor_splitkeep(fn)
+  local saved = vim.o.splitkeep
+  vim.o.splitkeep = "cursor"
+  local ok, res = pcall(fn)
+  vim.o.splitkeep = saved
+  if not ok then
+    error(res, 0)
+  end
+  return res
+end
+
 local function open_input(title, initial, on_submit, allow_empty)
   local input = vim.api.nvim_create_buf(false, true)
   vim.bo[input].filetype = "markdown"
@@ -676,11 +698,13 @@ local function open_input(title, initial, on_submit, allow_empty)
   if initial and #initial > 0 then
     vim.api.nvim_buf_set_lines(input, 0, -1, false, initial)
   end
-  local win = vim.api.nvim_open_win(input, true, {
-    split = "below",
-    win = 0,
-    height = COMPOSE_HEIGHT,
-  })
+  local win = with_cursor_splitkeep(function()
+    return vim.api.nvim_open_win(input, true, {
+      split = "below",
+      win = 0,
+      height = COMPOSE_HEIGHT,
+    })
+  end)
   -- The float's title moves to a winbar; escape %, it's a statusline format.
   vim.wo[win].winbar = ("%%#Title# %s %%#Comment# · <C-s> send · q cancel "):format(
     title:gsub("%%", "%%%%")
@@ -693,7 +717,9 @@ local function open_input(title, initial, on_submit, allow_empty)
 
   local function close()
     if vim.api.nvim_win_is_valid(win) then
-      vim.api.nvim_win_close(win, true)
+      with_cursor_splitkeep(function()
+        vim.api.nvim_win_close(win, true)
+      end)
     end
   end
   local function submit()
@@ -709,7 +735,9 @@ local function open_input(title, initial, on_submit, allow_empty)
   if not (initial and #initial > 0) then
     vim.cmd("startinsert")
   end
+  return win, close
 end
+M.open_input = open_input -- exposed for the test suite
 
 -- Column width to soft-wrap inline comment bodies to. virt_lines don't wrap on
 -- their own, so long lines (e.g. a bare URL) would run off the right edge.
