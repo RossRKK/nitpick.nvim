@@ -113,6 +113,7 @@ describe("nitpick surface", function()
       "discard_draft",
       "submit",
       "set_shown",
+      "toggle_comments",
       "refresh",
       "has_comments",
       "jump_comment",
@@ -287,6 +288,42 @@ describe("comments.overview window", function()
     vim.api.nvim_win_close(win, true)
     comments.shown_roots[root] = nil
     comments.by_path = {}
+  end)
+end)
+
+describe("comments.toggle_comments", function()
+  -- Hiding drops the tree markers but keeps the fetched comments and drafts, so
+  -- re-showing is instant (no GitHub call) and restores the same view.
+  it("hides then re-shows a fetched repo from cache", function()
+    local root = vim.fs.normalize(vim.fn.getcwd())
+    vim.cmd("only")
+    vim.cmd("edit " .. root .. "/lua/nitpick/init.lua")
+    comments.shown_roots[root] = true
+    comments.fetched[root] = true
+    comments.by_path = {
+      [root] = { ["a.lua"] = { { line = 3, body = "hi", user = { login = "alice" } } } },
+    }
+    comments.drafts = { [root] = { ["b.lua"] = { { line = 1, body = "draft" } } } }
+    comments.rebuild_marked(root)
+    assert.is_true(comments.has_comments(root .. "/a.lua"))
+
+    comments.toggle_comments()
+    assert.is_nil(comments.shown_roots[root])
+    assert.is_false(comments.has_comments(root .. "/a.lua"))
+    assert.equals("", comments.statusline())
+    -- Caches survive the hide.
+    assert.is_not_nil(comments.by_path[root]["a.lua"])
+    assert.equals(1, #comments.drafts[root]["b.lua"])
+
+    comments.toggle_comments()
+    assert.is_true(comments.shown_roots[root])
+    assert.is_true(comments.has_comments(root .. "/a.lua"))
+    assert.is_true(comments.has_comments(root .. "/b.lua"))
+
+    comments.set_shown(false, root)
+    comments.by_path = {}
+    comments.drafts = {}
+    comments.fetched = {}
   end)
 end)
 

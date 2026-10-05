@@ -69,6 +69,10 @@ M.names = {}
 -- Repos whose inline comments are currently drawn (driven by review mode):
 -- normalized root -> true.
 M.shown_roots = {}
+-- Roots whose comments have been fetched at least once this session. Lets
+-- toggle_comments re-show from the caches without another GitHub round-trip;
+-- refresh() is the explicit re-fetch.
+M.fetched = {}
 -- Visibility toggles. Both outdated and resolved comments are kept in M.by_path
 -- and filtered at render time, so toggling either needs no re-fetch. Outdated
 -- shows by default (surfacing stale-line comments is the point); resolved hides
@@ -1076,6 +1080,7 @@ local function fetch_render(root)
     else
       M.by_path[root] = nil -- no PR for this branch: only drafts show
     end
+    M.fetched[root] = true
 
     -- Render now with whatever author names are already cached — the lookups
     -- below are one gh round-trip per new commenter, and comments shouldn't
@@ -1695,6 +1700,32 @@ function M.refresh()
   end
 end
 
+--- Hide or re-show the current repo's comments while review mode stays on
+--- (triage's base and statuses are untouched). Hiding goes through set_shown so
+--- the tree markers and buffer namespaces clear; re-showing redraws from the
+--- caches when a fetch has already happened, and only hits GitHub otherwise.
+--- Drafts are kept either way.
+function M.toggle_comments()
+  local root = current_root()
+  if not root then
+    return
+  end
+  if M.shown_roots[root] then
+    M.set_shown(false, root)
+    vim.notify("review: comments hidden")
+    return
+  end
+  M.shown_roots[root] = true
+  if M.fetched[root] then
+    M.rebuild_marked(root)
+    render_all()
+    require("nitpick.adapter").redraw()
+  else
+    fetch_render(root)
+  end
+  vim.notify("review: comments shown")
+end
+
 --- Re-mark and redraw from the caches after a visibility toggle (no network).
 local function redisplay()
   for root in pairs(M.shown_roots) do
@@ -1978,6 +2009,7 @@ local default_keys = {
   refresh = "<leader>rC",
   outdated = "<leader>ro",
   resolved = "<leader>rs",
+  hide = "<leader>rh",
 }
 
 --- Configure nitpick.nvim.
@@ -2067,6 +2099,7 @@ function M.setup(opts)
   mapk("refresh", "n", M.refresh, "Review: refresh PR comments")
   mapk("outdated", "n", M.toggle_outdated, "Review: toggle outdated comments")
   mapk("resolved", "n", M.toggle_resolved, "Review: toggle resolved comments")
+  mapk("hide", "n", M.toggle_comments, "Review: hide/show all PR comments")
 
   vim.api.nvim_create_user_command("ReviewComment", function()
     M.comment(nil, vim.fn.line("."))
@@ -2126,6 +2159,11 @@ function M.setup(opts)
     "ReviewToggleResolved",
     M.toggle_resolved,
     { desc = "Toggle display of resolved PR comments" }
+  )
+  vim.api.nvim_create_user_command(
+    "ReviewToggleComments",
+    M.toggle_comments,
+    { desc = "Hide/show all PR comments for this repo (review mode stays on)" }
   )
 end
 
