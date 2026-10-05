@@ -698,6 +698,10 @@ end
 local function open_input(title, initial, on_submit, allow_empty)
   local input = vim.api.nvim_create_buf(false, true)
   vim.bo[input].filetype = "markdown"
+  -- After the filetype, so it beats any FileType textwidth: GitHub keeps single
+  -- newlines in comments, so a hard wrap would reach the PR as line breaks.
+  -- The window soft-wraps instead (below).
+  vim.bo[input].textwidth = 0
   vim.bo[input].bufhidden = "wipe"
   if initial and #initial > 0 then
     vim.api.nvim_buf_set_lines(input, 0, -1, false, initial)

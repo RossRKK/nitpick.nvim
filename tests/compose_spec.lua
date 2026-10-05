@@ -47,4 +47,32 @@ describe("open_input", function()
     assert.equal(target, vim.api.nvim_win_get_cursor(code_win)[1])
     assert.equal("screen", vim.o.splitkeep) -- restored, not leaked
   end)
+
+  it("doesn't hard-wrap the comment as you type", function()
+    -- GitHub keeps single newlines in comments, so a hard wrap would reach the
+    -- PR as 80-column line breaks. Reproduce a config that gives every markdown
+    -- buffer a textwidth, as the user's prose autocmd does.
+    local group = vim.api.nvim_create_augroup("nitpick_test_prose", { clear = true })
+    vim.api.nvim_create_autocmd("FileType", {
+      group = group,
+      pattern = "markdown",
+      callback = function()
+        vim.opt_local.textwidth = 80
+        vim.opt_local.formatoptions:append("t")
+      end,
+    })
+
+    local win, close = nitpick.open_input("t", nil, function() end)
+    vim.cmd("stopinsert")
+    local buf = vim.api.nvim_win_get_buf(win)
+    assert.equal("markdown", vim.bo[buf].filetype)
+    assert.equal(0, vim.bo[buf].textwidth)
+
+    local long = vim.fn["repeat"]("word ", 40)
+    vim.cmd("normal! A" .. long)
+    assert.same({ long }, vim.api.nvim_buf_get_lines(buf, 0, -1, false))
+
+    close()
+    vim.api.nvim_del_augroup_by_id(group)
+  end)
 end)
