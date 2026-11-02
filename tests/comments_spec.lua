@@ -10,6 +10,7 @@ describe("comments.rebuild_marked", function()
     comments.by_path = {}
     comments.drafts = {}
     comments.marked = {}
+    comments.live_shown = { ["/repo"] = true, ["/other"] = true }
   end)
 
   it("is empty when there are no comments or drafts", function()
@@ -91,6 +92,17 @@ describe("comments.rebuild_marked", function()
     assert.is_true(comments.marked["/other/b.lua"])
     assert.is_true(comments.marked["/repo/kept.lua"])
     assert.is_nil(comments.marked["/repo/a.lua"])
+  end)
+
+  -- PR comments are opt-in per review; until then only your drafts light up.
+  it("marks only drafts while PR comments are hidden", function()
+    comments.live_shown = {}
+    comments.by_path = { ["/repo"] = { ["src/live.lua"] = { { line = 1 } } } }
+    comments.drafts = { ["/repo"] = { ["docs/draft.md"] = { { line = 1, body = "hi" } } } }
+    comments.rebuild_marked("/repo")
+
+    assert.is_nil(comments.marked["/repo/src/live.lua"])
+    assert.is_true(comments.marked["/repo/docs/draft.md"])
   end)
 
   it("normalizes a root given with a trailing slash", function()
@@ -211,6 +223,20 @@ describe("comments.overview_entries", function()
     comments.drafts = {}
     comments.show_outdated = true
     comments.show_resolved = false
+    comments.live_shown = { ["/repo"] = true }
+  end)
+
+  it("lists only drafts while PR comments are hidden", function()
+    comments.live_shown = {}
+    comments.by_path = {
+      ["/repo"] = { ["a.lua"] = { { line = 3, body = "live", user = { login = "alice" } } } },
+    }
+    comments.drafts = { ["/repo"] = { ["a.lua"] = { { line = 1, body = "mine" } } } }
+    local kinds = {}
+    for _, e in ipairs(comments.overview_entries("/repo")) do
+      kinds[#kinds + 1] = e.kind
+    end
+    assert.same({ "draft" }, kinds)
   end)
 
   it("is empty with no comments or drafts", function()
@@ -271,6 +297,7 @@ describe("comments.overview window", function()
     vim.cmd("edit " .. root .. "/lua/nitpick/init.lua")
     local prev = vim.api.nvim_get_current_win()
     comments.shown_roots[root] = true
+    comments.live_shown[root] = true
     comments.by_path = {
       [root] = { ["a.lua"] = { { line = 3, body = "hi", user = { login = "alice" } } } },
     }
@@ -287,43 +314,67 @@ describe("comments.overview window", function()
 
     vim.api.nvim_win_close(win, true)
     comments.shown_roots[root] = nil
+    comments.live_shown[root] = nil
     comments.by_path = {}
   end)
 end)
 
 describe("comments.toggle_comments", function()
-  -- Hiding drops the tree markers but keeps the fetched comments and drafts, so
-  -- re-showing is instant (no GitHub call) and restores the same view.
-  it("hides then re-shows a fetched repo from cache", function()
-    local root = vim.fs.normalize(vim.fn.getcwd())
+  local root
+
+  -- A fetched repo with one PR comment (a.lua) and one draft (b.lua); review
+  -- mode on, as triage's toggle leaves it.
+  before_each(function()
+    root = vim.fs.normalize(vim.fn.getcwd())
     vim.cmd("only")
     vim.cmd("edit " .. root .. "/lua/nitpick/init.lua")
-    comments.shown_roots[root] = true
-    comments.fetched[root] = true
+    comments.fetched = { [root] = true }
     comments.by_path = {
       [root] = { ["a.lua"] = { { line = 3, body = "hi", user = { login = "alice" } } } },
     }
     comments.drafts = { [root] = { ["b.lua"] = { { line = 1, body = "draft" } } } }
-    comments.rebuild_marked(root)
-    assert.is_true(comments.has_comments(root .. "/a.lua"))
+    comments.set_shown(true, root)
+  end)
 
-    comments.toggle_comments()
-    assert.is_nil(comments.shown_roots[root])
-    assert.is_false(comments.has_comments(root .. "/a.lua"))
-    assert.equals("", comments.statusline())
-    -- Caches survive the hide.
-    assert.is_not_nil(comments.by_path[root]["a.lua"])
-    assert.equals(1, #comments.drafts[root]["b.lua"])
-
-    comments.toggle_comments()
-    assert.is_true(comments.shown_roots[root])
-    assert.is_true(comments.has_comments(root .. "/a.lua"))
-    assert.is_true(comments.has_comments(root .. "/b.lua"))
-
+  after_each(function()
     comments.set_shown(false, root)
     comments.by_path = {}
     comments.drafts = {}
     comments.fetched = {}
+  end)
+
+  it("starts review mode with drafts only", function()
+    assert.is_false(comments.has_comments(root .. "/a.lua"))
+    assert.is_true(comments.has_comments(root .. "/b.lua"))
+    assert.equals("", comments.statusline())
+  end)
+
+  -- Showing is instant from the fetch cache (no GitHub call); hiding keeps the
+  -- caches so the next show restores the same view, and drafts never go away.
+  it("shows then hides PR comments from cache, keeping drafts", function()
+    comments.toggle_comments()
+    assert.is_true(comments.has_comments(root .. "/a.lua"))
+    assert.is_true(comments.has_comments(root .. "/b.lua"))
+    assert.is_not.equals("", comments.statusline())
+
+    comments.toggle_comments()
+    assert.is_false(comments.has_comments(root .. "/a.lua"))
+    assert.is_true(comments.has_comments(root .. "/b.lua"))
+    assert.is_not_nil(comments.by_path[root]["a.lua"])
+  end)
+
+  it("forgets the opt-in when review mode turns off", function()
+    comments.toggle_comments()
+    comments.set_shown(false, root)
+    comments.set_shown(true, root)
+    assert.is_false(comments.has_comments(root .. "/a.lua"))
+  end)
+
+  it("does nothing outside review mode", function()
+    comments.set_shown(false, root)
+    comments.toggle_comments()
+    assert.is_nil(comments.live_shown[root])
+    assert.is_nil(comments.shown_roots[root])
   end)
 end)
 
