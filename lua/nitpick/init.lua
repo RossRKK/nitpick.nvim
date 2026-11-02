@@ -20,8 +20,9 @@
 -- on a line carrying a draft it edits the draft locally; on your own live
 -- comment it PATCHes GitHub; if both are present it asks which.
 --
--- Everyone's line comments render inline as virtual text, shown/hidden with
--- review mode; your unsent drafts render alongside them in a dimmer hue. Two
+-- Your unsent drafts render inline as virtual text while review mode is on.
+-- Everyone's line comments are opt-in on top (toggle_comments, per repo, reset
+-- when review mode turns off), with the drafts in a dimmer hue beside them. Two
 -- categories are noisy, so they're filtered at render time behind toggles
 -- (M.show_outdated / M.show_resolved, and the tree icon follows suit): comments
 -- GitHub no longer anchors (its `line` nulled — "outdated"), shown by default and
@@ -69,6 +70,10 @@ M.names = {}
 -- Repos whose inline comments are currently drawn (driven by review mode):
 -- normalized root -> true.
 M.shown_roots = {}
+-- Shown repos whose PR comments are drawn too, not just your drafts: opt-in per
+-- review (toggle_comments), since other people's threads are noisy while you
+-- read. normalized root -> true.
+M.live_shown = {}
 -- Roots whose comments have been fetched at least once this session. Lets
 -- toggle_comments re-show from the caches without another GitHub round-trip;
 -- refresh() is the explicit re-fetch.
@@ -114,6 +119,15 @@ local function comment_visible(c)
     return false
   end
   return true
+end
+
+--- One repo's fetched PR comments (rel path -> list), or none while they're
+--- hidden. Every display path reads through this so hidden means hidden
+--- everywhere; drafts are separate and unaffected.
+---@param root string normalized
+---@return table<string, table[]>
+local function shown_live(root)
+  return M.live_shown[root] and M.by_path[root] or {}
 end
 
 --- Remap a 1-based line number from a base file to its position in an edited
@@ -434,7 +448,7 @@ function M.rebuild_marked(root)
       M.marked[abs] = nil
     end
   end
-  for rel, list in pairs(M.by_path[nroot] or {}) do
+  for rel, list in pairs(shown_live(nroot)) do
     for _, c in ipairs(list) do
       if comment_visible(c) then
         mark_with_ancestors(M.marked, nroot, rel)
@@ -845,7 +859,7 @@ local function buf_by_line(buf)
     return nil
   end
   sync_draft_positions(buf, rel, root)
-  local live = (M.by_path[root] or {})[rel]
+  local live = shown_live(root)[rel]
   local drafts = ensure_drafts(root)[rel]
   if not live and not drafts then
     return nil
@@ -1669,8 +1683,9 @@ function M.submit()
 end
 
 --- Show or hide one repo's inline comments (default: the cwd's repo, matching
---- how triage scopes its toggle). Showing fetches from GitHub; hiding just
---- clears that repo's rendering — other repos' reviews are untouched.
+--- how triage scopes its toggle). Showing draws your drafts only — PR comments
+--- wait for toggle_comments, so no GitHub call happens here; hiding clears that
+--- repo's rendering and its opt-in — other repos' reviews are untouched.
 ---@param on boolean
 ---@param root string? repo root; defaults to the cwd's
 function M.set_shown(on, root)
@@ -1680,8 +1695,11 @@ function M.set_shown(on, root)
   end
   M.shown_roots[root] = on or nil
   if on then
-    fetch_render(root)
+    ensure_drafts(root)
+    M.rebuild_marked(root)
+    render_all()
   else
+    M.live_shown[root] = nil
     for abs in pairs(M.marked) do
       if under(abs, root) then
         M.marked[abs] = nil
@@ -1704,30 +1722,26 @@ function M.refresh()
   end
 end
 
---- Hide or re-show the current repo's comments while review mode stays on
---- (triage's base and statuses are untouched). Hiding goes through set_shown so
---- the tree markers and buffer namespaces clear; re-showing redraws from the
---- caches when a fetch has already happened, and only hits GitHub otherwise.
---- Drafts are kept either way.
+--- Show or hide the current repo's PR comments within review mode; your drafts
+--- show either way. Showing redraws from the caches when a fetch has already
+--- happened, and only hits GitHub otherwise.
 function M.toggle_comments()
   local root = current_root()
   if not root then
     return
   end
-  if M.shown_roots[root] then
-    M.set_shown(false, root)
-    vim.notify("review: comments hidden")
+  if not M.shown_roots[root] then
+    vim.notify("review: turn review mode on first", vim.log.levels.INFO)
     return
   end
-  M.shown_roots[root] = true
-  if M.fetched[root] then
+  M.live_shown[root] = not M.live_shown[root] or nil
+  if M.live_shown[root] and not M.fetched[root] then
+    fetch_render(root)
+  else
     M.rebuild_marked(root)
     render_all()
-    require("nitpick.adapter").redraw()
-  else
-    fetch_render(root)
   end
-  vim.notify("review: comments shown")
+  vim.notify("review: PR comments " .. (M.live_shown[root] and "shown" or "hidden"))
 end
 
 --- Re-mark and redraw from the caches after a visibility toggle (no network).
@@ -1766,15 +1780,16 @@ function M.display_summary()
   return table.concat(extra, "+")
 end
 
---- The comment fragment for the statusline: a speech bubble once comments are
---- shown, plus a trailing "+outdated"/"+resolved" naming any category on beyond
---- the default (current, unresolved) set, so the toggles are discoverable. Empty
---- while comments are hidden, so the statusline component collapses to nothing.
+--- The comment fragment for the statusline: a speech bubble once PR comments
+--- are shown, plus a trailing "+outdated"/"+resolved" naming any category on
+--- beyond the default (current, unresolved) set, so the toggles are discoverable.
+--- Empty while PR comments are hidden (drafts-only review included), so the
+--- statusline component collapses to nothing.
 --- (triage.nvim contributes the base separately; lualine concatenates the two.)
 ---@return string
 function M.statusline()
   local root = cwd_root()
-  if not root or not M.shown_roots[root] then
+  if not root or not M.live_shown[root] then
     return ""
   end
   local bubble = "\xef\x81\xb5" -- U+F075 nerd-font speech bubble (fa-comment)
@@ -1849,7 +1864,7 @@ local ns_overview = vim.api.nvim_create_namespace("review_overview")
 ---@return { path: string, line: integer, kind: "live"|"draft", login: string?, body: string, tags: string[] }[]
 function M.overview_entries(root)
   local entries = {}
-  for rel, list in pairs(M.by_path[root] or {}) do
+  for rel, list in pairs(shown_live(root)) do
     for _, c in ipairs(list) do
       if comment_visible(c) then
         local tags = {}
@@ -2103,7 +2118,7 @@ function M.setup(opts)
   mapk("refresh", "n", M.refresh, "Review: refresh PR comments")
   mapk("outdated", "n", M.toggle_outdated, "Review: toggle outdated comments")
   mapk("resolved", "n", M.toggle_resolved, "Review: toggle resolved comments")
-  mapk("hide", "n", M.toggle_comments, "Review: hide/show all PR comments")
+  mapk("hide", "n", M.toggle_comments, "Review: show/hide PR comments (drafts always show)")
 
   vim.api.nvim_create_user_command("ReviewComment", function()
     M.comment(nil, vim.fn.line("."))
@@ -2167,7 +2182,7 @@ function M.setup(opts)
   vim.api.nvim_create_user_command(
     "ReviewToggleComments",
     M.toggle_comments,
-    { desc = "Hide/show all PR comments for this repo (review mode stays on)" }
+    { desc = "Show/hide this repo's PR comments in review mode (drafts always show)" }
   )
 end
 

@@ -46,8 +46,10 @@ surface.
 ## Wiring with triage.nvim
 
 The two are designed to run as one review mode: a single toggle shows/hides
-both, and nitpick submits under triage's verdict. Wire them in one lazy spec —
-triage's `on_toggle` reveals nitpick, and nitpick's `verdict` borrows triage's:
+both (nitpick shows your drafts; other people's PR comments are opt-in with
+`<leader>rh`), and nitpick submits under triage's verdict. Wire them in one
+lazy spec — triage's `on_toggle` reveals nitpick, and nitpick's `verdict`
+borrows triage's:
 
 ```lua
 {
