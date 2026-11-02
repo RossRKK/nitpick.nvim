@@ -1722,26 +1722,40 @@ function M.refresh()
   end
 end
 
---- Show or hide the current repo's PR comments within review mode; your drafts
---- show either way. Showing redraws from the caches when a fetch has already
---- happened, and only hits GitHub otherwise.
-function M.toggle_comments()
-  local root = current_root()
-  if not root then
-    return
-  end
+--- Show or hide one repo's PR comments within its review; your drafts show
+--- either way. Showing redraws from the caches when a fetch has already
+--- happened, and only hits GitHub otherwise. Returns false (doing nothing)
+--- while that repo's review mode is off.
+---@param on boolean
+---@param root string repo root
+---@return boolean
+function M.set_comments_shown(on, root)
+  root = vim.fs.normalize(root)
   if not M.shown_roots[root] then
-    vim.notify("review: turn review mode on first", vim.log.levels.INFO)
-    return
+    return false
   end
-  M.live_shown[root] = not M.live_shown[root] or nil
-  if M.live_shown[root] and not M.fetched[root] then
+  M.live_shown[root] = on or nil
+  if on and not M.fetched[root] then
     fetch_render(root)
   else
     M.rebuild_marked(root)
     render_all()
   end
-  vim.notify("review: PR comments " .. (M.live_shown[root] and "shown" or "hidden"))
+  return true
+end
+
+--- Flip the current repo's PR comments (see set_comments_shown).
+function M.toggle_comments()
+  local root = current_root()
+  if not root then
+    return
+  end
+  local on = not M.live_shown[root]
+  if not M.set_comments_shown(on, root) then
+    vim.notify("review: turn review mode on first", vim.log.levels.INFO)
+    return
+  end
+  vim.notify("review: PR comments " .. (on and "shown" or "hidden"))
 end
 
 --- Re-mark and redraw from the caches after a visibility toggle (no network).

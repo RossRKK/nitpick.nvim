@@ -126,6 +126,7 @@ describe("nitpick surface", function()
       "submit",
       "set_shown",
       "toggle_comments",
+      "set_comments_shown",
       "refresh",
       "has_comments",
       "jump_comment",
@@ -373,8 +374,16 @@ describe("comments.toggle_comments", function()
   it("does nothing outside review mode", function()
     comments.set_shown(false, root)
     comments.toggle_comments()
+    assert.is_false(comments.set_comments_shown(true, root))
     assert.is_nil(comments.live_shown[root])
     assert.is_nil(comments.shown_roots[root])
+  end)
+
+  -- A caller opening a fresh tab has no repo buffer yet, so it names the repo.
+  it("shows a named repo's PR comments from any buffer", function()
+    vim.cmd("enew")
+    assert.is_true(comments.set_comments_shown(true, root .. "/"))
+    assert.is_true(comments.has_comments(root .. "/a.lua"))
   end)
 end)
 
