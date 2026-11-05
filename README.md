@@ -36,7 +36,7 @@ Pairs with [triage.nvim][] (per-file review status), but stands alone.
 
 | Key       | Type       | Description                                                        |
 | --------- | ---------- | ----------------------------------------------------------------- |
-| `verdict` | `fun()`    | Called to resolve the review verdict on submit. Wire triage's `verdict` here. |
+| `verdict` | `fun()`    | Called to infer the review verdict on submit. Wire triage's `verdict` here. `<C-e>` in the submit box overrides it. |
 
 The neo-tree "has comments" marker is registered as the `nitpick_marker`
 component (`require("nitpick.adapter").marker_component`); add it to your

@@ -7,7 +7,8 @@
 -- draft in one review; the verdict (approve / request-changes / comment) comes
 -- from an injected status source (opts.verdict) — in this config wired to
 -- triage.nvim's verdict, but any fun():event will do, and with none configured
--- the user is prompted. Submitting is cheap and repeatable — while triage's
+-- the user is prompted; <C-e> in the submit box overrides it either way.
+-- Submitting is cheap and repeatable — while triage's
 -- verdict reads as mid-review, an early, partial submit goes out as a plain
 -- COMMENT batch.
 --
@@ -709,6 +710,15 @@ local function with_cursor_splitkeep(fn)
   return res
 end
 
+--- Retitle a compose box. The title is a winbar, a statusline format, so % is escaped.
+---@param win integer
+---@param title string
+local function set_compose_title(win, title)
+  vim.wo[win].winbar = ("%%#Title# %s %%#Comment# · <C-s> send · q cancel "):format(
+    (title:gsub("%%", "%%%%"))
+  )
+end
+
 local function open_input(title, initial, on_submit, allow_empty)
   local input = vim.api.nvim_create_buf(false, true)
   vim.bo[input].filetype = "markdown"
@@ -727,10 +737,7 @@ local function open_input(title, initial, on_submit, allow_empty)
       height = COMPOSE_HEIGHT,
     })
   end)
-  -- The float's title moves to a winbar; escape %, it's a statusline format.
-  vim.wo[win].winbar = ("%%#Title# %s %%#Comment# · <C-s> send · q cancel "):format(
-    title:gsub("%%", "%%%%")
-  )
+  set_compose_title(win, title)
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
   vim.wo[win].signcolumn = "no"
@@ -1616,12 +1623,13 @@ function M.submit()
       end
     end
 
-    local title = ("Submit as %s · %d inline + %d folded · summary optional"):format(
-      verdict,
-      #inline,
-      #offdiff
-    )
-    open_input(title, nil, function(body, close)
+    -- The verdict source infers the event, but the reviewer has the last word:
+    -- <C-e> in the compose box cycles it, and the title says when it's overridden.
+    local inferred = M.opts.verdict and verdict or nil
+    local function title()
+      return M._submit_title(verdict, inferred, #inline, #offdiff)
+    end
+    local win = open_input(title(), nil, function(body, close)
       run(function()
         -- Anchor to the local checkout (M.head_commit), never the PR's remote
         -- head: the drafts were placed against the working copy, so if the
@@ -1679,7 +1687,43 @@ function M.submit()
         end
       end)
     end, true) -- allow an empty summary to submit
+    -- Buffer-local, so shadowing insert-mode <C-e> only costs it in this box.
+    vim.keymap.set({ "n", "i" }, "<C-e>", function()
+      verdict = M._next_verdict(verdict)
+      set_compose_title(win, title())
+    end, { buffer = vim.api.nvim_win_get_buf(win), desc = "Cycle review verdict" })
   end)
+end
+
+local VERDICTS = { "COMMENT", "APPROVE", "REQUEST_CHANGES" }
+
+--- The verdict after `verdict` in the compose box's <C-e> cycle.
+---@param verdict "APPROVE"|"REQUEST_CHANGES"|"COMMENT"
+---@return "APPROVE"|"REQUEST_CHANGES"|"COMMENT"
+function M._next_verdict(verdict)
+  for i, v in ipairs(VERDICTS) do
+    if v == verdict then
+      return VERDICTS[i % #VERDICTS + 1]
+    end
+  end
+  return VERDICTS[1]
+end
+
+--- The submit box's title: the verdict that will go out, and what the verdict
+--- source inferred when the reviewer has overridden it.
+---@param verdict string
+---@param inferred string? nil when there's no verdict source
+---@param n_inline integer
+---@param n_folded integer
+---@return string
+function M._submit_title(verdict, inferred, n_inline, n_folded)
+  local override = (inferred and inferred ~= verdict) and (" (inferred %s)"):format(inferred) or ""
+  return ("Submit as %s%s · <C-e> change · %d inline + %d folded · summary optional"):format(
+    verdict,
+    override,
+    n_inline,
+    n_folded
+  )
 end
 
 --- Show or hide one repo's inline comments (default: the cwd's repo, matching
