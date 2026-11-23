@@ -82,10 +82,10 @@ own; only the shared toggle and verdict come from triage.
 ## Tests
 
 ```bash
-make test
+nix develop -c make test   # or: nix flake check
 ```
 
-Headless plenary/busted; covers the tree-decorator set (which paths light up once
+Headless plenary/busted, with nvim, plenary, git and jj from the flake; covers the tree-decorator set (which paths light up once
 comments and drafts are folded together), the line remap across edits, and
 comment navigation.
 
