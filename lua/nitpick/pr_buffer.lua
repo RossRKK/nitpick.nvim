@@ -639,6 +639,9 @@ end
 -- A diff line's highlight by its first character.
 local DIFF_HL = { ["+"] = "DiffAdd", ["-"] = "DiffDelete" }
 
+-- Dashed, lighter than the solid rules between the buffer's sections.
+local THREAD_RULE = ("\u{254c}"):rep(60)
+
 -- Checks listed one per row: those needing attention. The rest are only counted.
 local LISTED = { failed = true, running = true }
 
@@ -765,8 +768,13 @@ function M.layout(pr, stack, now, show_bots)
     heading[2] = { (" \u{b7} %d by bots hidden (%s)"):format(hidden, table.concat(bots, ", ")), "Comment" }
   end
   row(heading)
-  for _, t in ipairs(threads) do
+  for i, t in ipairs(threads) do
     row({})
+    -- Drawn over the blank row, so the buffer's text stays the comments' own.
+    if i > 1 then
+      decorations[#decorations + 1] =
+        { #lines, { virt_text = { { THREAD_RULE, "NitpickPrThreadRule" } }, virt_text_pos = "overlay" } }
+    end
     local start = #lines + 1
     if t.kind == "inline" then
       local tags = {}
@@ -870,6 +878,7 @@ function M.setup(opts)
       NitpickPrBranch = "Identifier",
       NitpickPrAuthor = "Title",
       NitpickPrRule = "Comment",
+      NitpickPrThreadRule = "NonText",
       NitpickPrCodeOwner = "Special",
       NitpickPrPath = "Directory",
     }) do

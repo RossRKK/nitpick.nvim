@@ -204,6 +204,17 @@ describe("pr_buffer.layout", function()
     assert.same({ from + 6, from + 12 }, { layout.threads[2][1], layout.threads[2][2] })
   end)
 
+  it("rules off each thread from the one before it", function()
+    local p = conversation()
+    local layout = pr_buffer.layout(p, alone(p), NOW, {})
+    local from = layout.conversation_row
+    local rule = ("\u{254c}"):rep(60)
+    assert.is_nil(virt(layout, from + 1).overlay, "none between the heading and the first thread")
+    assert.equals(rule, virt(layout, from + 5).overlay)
+    assert.equals(rule, virt(layout, from + 13).overlay)
+    assert.is_nil(virt(layout, from + 18).overlay, "none after the last")
+  end)
+
   it("shows a bot's comments when asked to", function()
     local p = conversation()
     local layout = pr_buffer.layout(p, alone(p), NOW, { mergify = true })
