@@ -639,8 +639,8 @@ end
 -- A diff line's highlight by its first character.
 local DIFF_HL = { ["+"] = "DiffAdd", ["-"] = "DiffDelete" }
 
--- Dashed, lighter than the solid rules between the buffer's sections.
-local THREAD_RULE = ("\u{254c}"):rep(60)
+-- A reply's indent, drawn so the buffer's text stays the comment's own.
+local REPLY_INDENT = { { "    " } }
 
 -- Checks listed one per row: those needing attention. The rest are only counted.
 local LISTED = { failed = true, running = true }
@@ -769,12 +769,8 @@ function M.layout(pr, stack, now, show_bots)
   end
   row(heading)
   for i, t in ipairs(threads) do
-    row({})
-    -- Drawn over the blank row, so the buffer's text stays the comments' own.
-    if i > 1 then
-      decorations[#decorations + 1] =
-        { #lines, { virt_text = { { THREAD_RULE, "NitpickPrThreadRule" } }, virt_text_pos = "overlay" } }
-    end
+    -- A thematic break needs the blank row above it, or markdown reads the line before as a heading.
+    vim.list_extend(lines, i > 1 and { "", "---", "" } or { "" })
     local start = #lines + 1
     if t.kind == "inline" then
       local tags = {}
@@ -793,7 +789,7 @@ function M.layout(pr, stack, now, show_bots)
       -- Behind a bar, so markdown never reads a removed line as a list item.
       row({ { "\u{2502} ", "Comment" }, { h, DIFF_HL[h:sub(1, 1)] } })
     end
-    for _, c in ipairs(t.comments) do
+    for j, c in ipairs(t.comments) do
       local comment_start = #lines + 1
       local verdict = t.kind == "review" and REVIEWER_STATES[t.review_state]
       row({
@@ -805,6 +801,11 @@ function M.layout(pr, stack, now, show_bots)
         vim.list_extend(lines, vim.split(c.body, "\n", { plain = true }))
       end
       comment_spans[#comment_spans + 1] = { comment_start, #lines, c }
+      if j > 1 then
+        for r = comment_start, #lines do
+          decorations[#decorations + 1] = { r, { virt_text = REPLY_INDENT, virt_text_pos = "inline" } }
+        end
+      end
     end
     thread_spans[#thread_spans + 1] = { start, #lines, t }
   end
@@ -878,7 +879,6 @@ function M.setup(opts)
       NitpickPrBranch = "Identifier",
       NitpickPrAuthor = "Title",
       NitpickPrRule = "Comment",
-      NitpickPrThreadRule = "NonText",
       NitpickPrCodeOwner = "Special",
       NitpickPrPath = "Directory",
     }) do

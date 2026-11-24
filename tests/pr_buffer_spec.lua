@@ -186,6 +186,8 @@ describe("pr_buffer.layout", function()
       "My first line.",
       "My second line.",
       "",
+      "---",
+      "",
       "lua/x.lua:12",
       "\u{2502}  local a = 1",
       "\u{2502} +local b = 2",
@@ -194,6 +196,8 @@ describe("pr_buffer.layout", function()
       "@ross  30 minutes ago",
       "Because.",
       "",
+      "---",
+      "",
       "lua/y.lua:3  resolved",
       "\u{2502} -gone",
       "@bob  2 hours ago",
@@ -201,18 +205,16 @@ describe("pr_buffer.layout", function()
       "",
     }, vim.list_slice(layout.lines, from))
     assert.same({ from + 2, from + 4 }, { layout.comments[1][1], layout.comments[1][2] })
-    assert.same({ from + 6, from + 12 }, { layout.threads[2][1], layout.threads[2][2] })
+    assert.same({ from + 8, from + 14 }, { layout.threads[2][1], layout.threads[2][2] })
   end)
 
-  it("rules off each thread from the one before it", function()
+  it("indents a thread's replies, its first comment not", function()
     local p = conversation()
     local layout = pr_buffer.layout(p, alone(p), NOW, {})
     local from = layout.conversation_row
-    local rule = ("\u{254c}"):rep(60)
-    assert.is_nil(virt(layout, from + 1).overlay, "none between the heading and the first thread")
-    assert.equals(rule, virt(layout, from + 5).overlay)
-    assert.equals(rule, virt(layout, from + 13).overlay)
-    assert.is_nil(virt(layout, from + 18).overlay, "none after the last")
+    assert.is_nil(virt(layout, from + 11).inline, "the comment that opened the thread")
+    assert.equals("    ", virt(layout, from + 13).inline, "the reply's author row")
+    assert.equals("    ", virt(layout, from + 14).inline, "the reply's body")
   end)
 
   it("shows a bot's comments when asked to", function()
