@@ -1840,6 +1840,8 @@ function M.setup(opts)
     M.toggle_comments,
     { desc = "Show/hide this repo's PR comments in review mode (drafts always show)" }
   )
+
+  require("nitpick.pr_buffer").setup()
 end
 
 return M

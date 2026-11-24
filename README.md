@@ -79,6 +79,15 @@ borrows triage's:
 Standalone (no triage), `setup({})` is enough — comments and drafts work on their
 own; only the shared toggle and verdict come from triage.
 
+## PR buffer
+
+`:NitpickPr [number]` opens a PR (default: the current branch's) as a buffer
+named `nitpick://pr/<owner>/<repo>/<number>`. The title (first line) and the
+description (below the rule) are edited in place; `:w` or `<C-s>` saves them,
+and refuses if GitHub's copy of an edited field changed since the buffer
+loaded. The header shows the state, author, merge state and checks, with each
+failed or running check on its own row: `gd` there opens it.
+
 ## Tests
 
 ```bash
@@ -86,8 +95,9 @@ nix develop -c make test   # or: nix flake check
 ```
 
 Headless plenary/busted, with nvim, plenary, git and jj from the flake; covers the tree-decorator set (which paths light up once
-comments and drafts are folded together), the line remap across edits, and
-comment navigation.
+comments and drafts are folded together), the line remap across edits,
+comment navigation, and the PR buffer: GitHub's reply read from recorded
+fixtures (`tests/fixtures`), its header, and saving through a stand-in client.
 
 [neo-tree]: https://github.com/nvim-neo-tree/neo-tree.nvim
 [triage.nvim]: https://github.com/RossRKK/triage.nvim

@@ -1,0 +1,81 @@
+{
+    "data": {
+        "repository": {
+            "pullRequest": {
+                "id": "PR_kwDOEdDlnM8AAAABPL2oOw",
+                "number": 1591,
+                "url": "https://github.com/pwntester/octo.nvim/pull/1591",
+                "title": "fix(discussion): resolve org-wide discussion URLs",
+                "body": "fix(discussion): resolve org-wide discussion URLs\n\ngithub.com canonicalizes org-wide discussions to\n`/orgs/<org>/discussions/<n>`, so `URL_ISSUE_PATTERN` parsed the repo as\n`orgs/<org>` and the GraphQL lookup failed. The URL now maps to\n`<org>/<org>`.\n\n```\n:Octo https://github.com/orgs/community/discussions/144793\n```\n\nThe real repo is the org's user-chosen source repository\n(https://docs.github.com/en/organizations/managing-organization-settings/enabling-or-disabling-github-discussions-for-an-organization),\nwhich is not always `<org>/<org>` (e.g. `Homebrew/discussions`).\n`<org>/<org>` is the common case and there is no API to look the source\nrepo up from the URL alone; the comment on `resolve_org_url_repo` spells\nout the caveat.\n\nAlso applies to link navigation from the cursor via\n`extract_issue_at_cursor`, and to GHE hostnames.\n",
+                "state": "MERGED",
+                "isDraft": false,
+                "createdAt": "2026-11-14T17:09:48Z",
+                "updatedAt": "2026-11-14T17:17:11Z",
+                "headRefName": "fix/org-discussion-url",
+                "baseRefName": "master",
+                "author": {
+                    "__typename": "User",
+                    "login": "williambdean"
+                },
+                "mergeable": "UNKNOWN",
+                "mergeStateStatus": "UNKNOWN",
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "statusCheckRollup": {
+                                    "contexts": {
+                                        "nodes": [
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "pre-commit",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/pwntester/octo.nvim/actions/runs/43619592977/job/132522014909"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "semantic-pr",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/pwntester/octo.nvim/actions/runs/43619592984/job/132522017874"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "sync",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/pwntester/octo.nvim/actions/runs/43619592958/job/132522017041"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "X64-ubuntu (stable)",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/pwntester/octo.nvim/actions/runs/43619592992/job/132522015122"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "typecheck (stable, 3.18.2)",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/pwntester/octo.nvim/actions/runs/43619592942/job/132522014914"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "X64-ubuntu (nightly)",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/pwntester/octo.nvim/actions/runs/43619592992/job/132522015302"
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}

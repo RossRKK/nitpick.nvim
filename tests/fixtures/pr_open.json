@@ -1,0 +1,53 @@
+{
+    "data": {
+        "repository": {
+            "pullRequest": {
+                "id": "PR_kwDOEdDlnM8AAAABRUgShA",
+                "number": 1601,
+                "url": "https://github.com/pwntester/octo.nvim/pull/1601",
+                "title": "fix(label): support label names containing spaces",
+                "body": "### Describe what this PR does / why we need it\n\n`:Octo label remove \"Needs Triage\"` answered \"Cannot find label: \\\"Needs\". A user command splits its\narguments on whitespace, so the command received `\"Needs` and `Triage\"` and looked the label up by the\nfirst word only. The same happened for `label add`, `label create`, `label delete` and `label edit`.\n\nThe label arguments are now joined back into one name, with a surrounding pair of quotes dropped, before\nthe label is looked up, so label names containing spaces work with and without quotes. A single word\nlabel, and a call without a label, behave as before, picker fallback included.\n\n### Does this pull request fix one issue?\n\nFixes #1141\n\n### Describe how you did it\n\nA local `join_args` helper in `lua/octo/commands.lua` packs the varargs, joins them with a space and strips\na surrounding `\"...\"` or `'...'` pair. It returns `nil` when nothing was passed, so `create_label`,\n`label_action`, and the `edit` and `delete` handlers keep falling back to their prompt or picker exactly as\nthey did when the subcommands took a single argument. The five label subcommands now take varargs and pass\nthe joined name through.\n\n### Describe how to verify it\n\nThe new spec `lua/tests/plenary/commands_label_spec.lua` stubs the label entry points and drives the command\ndispatcher with the argument list a user command actually produces. With `nargs = \"*\"`,\n`:Octo label remove \"Needs Triage\"` arrives as `{\"label\", \"remove\", '\"Needs', 'Triage\"'}`, which the spec\nmirrors.\n\nWithout the fix 5 of its 7 cases fail (for example, expected `Needs Triage`, got `Needs`); with the fix all\n7 pass.\n\nCommands run on Windows 11 with Neovim v0.12.6:\n\n```\nnvim --headless --noplugin -u lua/tests/minimal_init.vim -c \"lua require('plenary.busted').run('lua/tests/plenary/commands_label_spec.lua')\"\n```\n\nAll 24 spec files under `lua/tests/plenary/` pass with the change (0 failures, 0 errors), which is the same\nset of files the `PlenaryBustedDirectory` CI job runs. `stylua --check` passes on the changed files, and\n`lua-language-server` 3.18.2 with `--check lua/octo --checklevel=Information` reports no problems.\n\n### Special notes for reviews\n\n`doc/octo.txt` gained one example line for a label name with a space.\n\n### Checklist\n\n- [x] Passing tests and linting standards\n- [x] Documentation updates in README.md and doc/octo.txt\n\nAI was used to write this code.\n",
+                "state": "OPEN",
+                "isDraft": false,
+                "createdAt": "2026-11-23T16:50:17Z",
+                "updatedAt": "2026-11-23T16:50:42Z",
+                "headRefName": "fix/label-names-with-spaces",
+                "baseRefName": "master",
+                "author": {
+                    "__typename": "User",
+                    "login": "lyn1dev"
+                },
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "UNSTABLE",
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "statusCheckRollup": {
+                                    "contexts": {
+                                        "nodes": [
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "semantic-pr",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/pwntester/octo.nvim/actions/runs/45220995786/job/137854883446"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "sync",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/pwntester/octo.nvim/actions/runs/45220995790/job/137854884942"
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}
