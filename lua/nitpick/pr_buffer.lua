@@ -12,7 +12,7 @@ local timeline = require("nitpick.timeline")
 
 local M = {}
 
-local write, spanning -- defined below their callers
+local write, spanning, fold_threads, remember_folds -- defined below their callers
 
 ---@class nitpick.PrClient
 ---@field fetch fun(ref: nitpick.PrRef): nitpick.Pr?, string?
@@ -29,6 +29,7 @@ local write, spanning -- defined below their callers
 ---@field threads table<integer, nitpick.Thread> a thread's extmark id -> it
 ---@field comments table<integer, nitpick.Comment> a comment's extmark id -> it
 ---@field editable { comment: nitpick.Comment, above: integer, below: integer }[] your comments, by the marks on the rows bounding their bodies
+---@field folded table<string, boolean> by thread, whether its fold was closed when the buffer last redrew
 
 ---@type table<integer, nitpick.PrBufferState>
 local states = {}
@@ -123,7 +124,8 @@ end
 ---@param ref nitpick.PrRef
 ---@param client nitpick.PrClient
 function M.attach(buf, ref, client)
-  states[buf] = { ref = ref, client = client, check_urls = {}, stack_rows = {}, threads = {}, comments = {}, editable = {} }
+  states[buf] =
+    { ref = ref, client = client, check_urls = {}, stack_rows = {}, threads = {}, comments = {}, editable = {}, folded = {} }
   vim.bo[buf].buftype = "acwrite"
   vim.bo[buf].swapfile = false
   vim.bo[buf].filetype = "markdown"
@@ -131,6 +133,13 @@ function M.attach(buf, ref, client)
     buffer = buf,
     callback = function()
       M.save(buf)
+    end,
+  })
+  -- Folds are the window's: each window showing the buffer gets its own.
+  vim.api.nvim_create_autocmd("BufWinEnter", {
+    buffer = buf,
+    callback = function()
+      fold_threads(buf, vim.api.nvim_get_current_win())
     end,
   })
   vim.api.nvim_create_autocmd("BufWipeout", {
@@ -360,6 +369,7 @@ end
 ---@param stack nitpick.Stack
 ---@param now integer
 function M.render(buf, pr, stack, now)
+  remember_folds(buf)
   local layout = M.layout(pr, stack, now, shown_bots)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, layout.lines)
   for _, space in ipairs({ ns, ns_regions, ns_checks, ns_stack, ns_threads, ns_comments, ns_bounds }) do
@@ -419,7 +429,63 @@ function M.render(buf, pr, stack, now)
   states[buf].pr = pr
   states[buf].check_urls = check_urls
   states[buf].stack_rows = stack_rows
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    fold_threads(buf, win)
+  end
   vim.bo[buf].modified = false
+end
+
+--- A thread's name across renders: its own id, else its first comment's.
+---@param t nitpick.Thread
+---@return string
+local function thread_key(t)
+  return t.id or t.comments[1].id
+end
+
+--- Fold each thread of `buf` in `win`, a resolved one closed and the rest open,
+--- unless someone has opened or closed it since.
+---@param buf integer
+---@param win integer
+function fold_threads(buf, win)
+  local state = states[buf]
+  vim.wo[win][0].foldmethod = "manual"
+  vim.wo[win][0].foldenable = true
+  -- Its first line drawn as itself: the thread's file and line, or its author.
+  vim.wo[win][0].foldtext = ""
+  vim.api.nvim_win_call(win, function()
+    vim.cmd("silent! normal! zE")
+    for id, t in pairs(state.threads) do
+      local mark = vim.api.nvim_buf_get_extmark_by_id(buf, ns_threads, id, { details = true })
+      if mark[1] then
+        vim.cmd(("%d,%dfold"):format(mark[1] + 1, mark[3].end_row + 1))
+        local closed = state.folded[thread_key(t)]
+        if closed == nil then
+          closed = t.resolved
+        end
+        if not closed then
+          vim.cmd(("%dfoldopen"):format(mark[1] + 1))
+        end
+      end
+    end
+  end)
+end
+
+--- Keep, by thread, whether each fold of `buf` is closed in the window showing it.
+---@param buf integer
+function remember_folds(buf)
+  local state = states[buf]
+  local win = vim.fn.win_findbuf(buf)[1]
+  if not win then
+    return
+  end
+  for id, t in pairs(state.threads) do
+    local row = vim.api.nvim_buf_get_extmark_by_id(buf, ns_threads, id, {})[1]
+    if row then
+      state.folded[thread_key(t)] = vim.api.nvim_win_call(win, function()
+        return vim.fn.foldclosed(row + 1) ~= -1
+      end)
+    end
+  end
 end
 
 --- The title and description as `buf` holds them now: every line between the
@@ -708,32 +774,29 @@ function M.layout(pr, stack, now, show_bots)
         tags[#tags + 1] = "outdated"
       end
       if t.resolved then
-        tags[#tags + 1] = ("resolved, %d comment%s"):format(#t.comments, #t.comments == 1 and "" or "s")
+        tags[#tags + 1] = "resolved"
       end
       row({
         { t.path .. (t.line and (":" .. t.line) or ""), "NitpickPrPath" },
         { #tags > 0 and ("  " .. table.concat(tags, " \u{b7} ")) or "", "Comment" },
       })
     end
-    -- GitHub hides a resolved thread behind its file and line; so does this.
-    if not t.resolved then
-      for _, h in ipairs(t.hunk or {}) do
-        -- Behind a bar, so markdown never reads a removed line as a list item.
-        row({ { "\u{2502} ", "Comment" }, { h, DIFF_HL[h:sub(1, 1)] } })
+    for _, h in ipairs(t.hunk or {}) do
+      -- Behind a bar, so markdown never reads a removed line as a list item.
+      row({ { "\u{2502} ", "Comment" }, { h, DIFF_HL[h:sub(1, 1)] } })
+    end
+    for _, c in ipairs(t.comments) do
+      local comment_start = #lines + 1
+      local verdict = t.kind == "review" and REVIEWER_STATES[t.review_state]
+      row({
+        { "@" .. c.author.login .. (c.author.is_bot and " (bot)" or ""), "NitpickPrAuthor" },
+        { "  " .. M.ago(now - c.created_at), "Comment" },
+        verdict and { "  " .. verdict[3], verdict[2] } or { "" },
+      })
+      if c.body ~= "" then
+        vim.list_extend(lines, vim.split(c.body, "\n", { plain = true }))
       end
-      for _, c in ipairs(t.comments) do
-        local comment_start = #lines + 1
-        local verdict = t.kind == "review" and REVIEWER_STATES[t.review_state]
-        row({
-          { "@" .. c.author.login .. (c.author.is_bot and " (bot)" or ""), "NitpickPrAuthor" },
-          { "  " .. M.ago(now - c.created_at), "Comment" },
-          verdict and { "  " .. verdict[3], verdict[2] } or { "" },
-        })
-        if c.body ~= "" then
-          vim.list_extend(lines, vim.split(c.body, "\n", { plain = true }))
-        end
-        comment_spans[#comment_spans + 1] = { comment_start, #lines, c }
-      end
+      comment_spans[#comment_spans + 1] = { comment_start, #lines, c }
     end
     thread_spans[#thread_spans + 1] = { start, #lines, t }
   end

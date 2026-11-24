@@ -175,7 +175,7 @@ describe("pr_buffer.layout", function()
     assert.equals("Checks: none", layout.lines[7])
   end)
 
-  it("lays the conversation out under the description, the code a thread is on above it, resolved ones collapsed", function()
+  it("lays the conversation out under the description, the code a thread is on above it", function()
     local p = conversation()
     local layout = pr_buffer.layout(p, alone(p), NOW, {})
     local from = layout.conversation_row
@@ -194,7 +194,10 @@ describe("pr_buffer.layout", function()
       "@ross  30 minutes ago",
       "Because.",
       "",
-      "lua/y.lua:3  resolved, 1 comment",
+      "lua/y.lua:3  resolved",
+      "\u{2502} -gone",
+      "@bob  2 hours ago",
+      "Said bob.",
       "",
     }, vim.list_slice(layout.lines, from))
     assert.same({ from + 2, from + 4 }, { layout.comments[1][1], layout.comments[1][2] })
@@ -495,6 +498,39 @@ describe("a PR buffer's conversation", function()
     pr_buffer.save(buf)
     assert.same({}, writes)
     assert.matches("can't be emptied", notified[#notified].msg)
+  end)
+
+  --- The first and last row of the closed fold at `row`, or nil when it's open.
+  local function closed_at(row)
+    local first = vim.fn.foldclosed(row)
+    return first ~= -1 and { first, vim.fn.foldclosedend(row) } or nil
+  end
+
+  it("folds each thread, a resolved one closed and the rest open", function()
+    local buf = attached({ pr = conversation() })
+    local resolved = row_of(buf, "lua/y.lua:3  resolved")
+    assert.same({ resolved, resolved + 3 }, closed_at(resolved))
+    local open = row_of(buf, "lua/x.lua:12")
+    assert.is_nil(closed_at(open))
+    vim.cmd(open .. "foldclose")
+    assert.same({ open, row_of(buf, "Because.") }, closed_at(open), "the fold covers the thread, its code and every comment")
+  end)
+
+  it("keeps the folds as they were left across a reload", function()
+    local buf = attached({ pr = conversation() })
+    vim.cmd(row_of(buf, "lua/y.lua:3  resolved") .. "foldopen")
+    vim.cmd(row_of(buf, "lua/x.lua:12") .. "foldclose")
+    pr_buffer.refresh(buf)
+    assert.is_nil(closed_at(row_of(buf, "lua/y.lua:3  resolved")))
+    assert.is_not_nil(closed_at(row_of(buf, "lua/x.lua:12")))
+  end)
+
+  it("folds the threads afresh in another window showing the buffer", function()
+    local buf = attached({ pr = conversation() })
+    vim.cmd("split")
+    vim.api.nvim_win_set_buf(0, buf)
+    assert.is_not_nil(closed_at(row_of(buf, "lua/y.lua:3  resolved")))
+    vim.cmd("close")
   end)
 
   it("replies in a thread on the code from the compose box", function()

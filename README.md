@@ -96,8 +96,9 @@ own row: `gd` there opens it.
 
 Under the description, the conversation: comments on the PR, reviews' summaries
 and threads on the code (file and line, then the end of the diff hunk), the
-newest activity first; GitHub's resolved threads collapse to their file and line,
-and threads only bots wrote are hidden (`setup({ show_bots = { "login" } })`
+newest activity first. Each thread is a fold, open while it is unresolved and
+closed once resolved, kept as you leave it across a reload; threads only bots
+wrote are hidden (`setup({ show_bots = { "login" } })`
 keeps a bot's). Your own comments edit in place like the description, saved by
 the same `:w`. `<leader>ra` on a thread replies (in the thread for one on the
 code, else as a comment on the PR to its author), `<leader>rc` comments on the
