@@ -13,6 +13,7 @@ local M = {}
 ---@alias nitpick.PrState "open"|"draft"|"merged"|"closed"
 ---@alias nitpick.MergeState "clean"|"conflicts"|"blocked"|"behind"|"unstable"|"draft"|"unknown"
 ---@alias nitpick.CheckState "failed"|"running"|"skipped"|"passed"
+---@alias nitpick.ReviewDecision "approved"|"changes_requested"|"review_required"
 
 ---@class nitpick.Check
 ---@field name string
@@ -32,6 +33,7 @@ local M = {}
 ---@field created_at integer epoch seconds
 ---@field updated_at integer epoch seconds
 ---@field merge nitpick.MergeState? nil once merged or closed
+---@field review nitpick.ReviewDecision?
 ---@field checks nitpick.Check[]
 
 M.QUERY = [[
@@ -40,7 +42,7 @@ query($owner:String!,$name:String!,$number:Int!){
     pullRequest(number:$number){
       id number url title body state isDraft createdAt updatedAt headRefName baseRefName
       author{ __typename login }
-      mergeable mergeStateStatus
+      mergeable mergeStateStatus reviewDecision
       commits(last:1){ nodes{ commit{ statusCheckRollup{ contexts(first:100){ nodes{
         __typename
         ... on CheckRun{ name status conclusion detailsUrl }
@@ -121,6 +123,13 @@ local MERGE_STATES = {
   UNKNOWN = "unknown",
 }
 
+-- GitHub's reviewDecision, as nitpick names it.
+M.REVIEW_DECISIONS = {
+  APPROVED = "approved",
+  CHANGES_REQUESTED = "changes_requested",
+  REVIEW_REQUIRED = "review_required",
+}
+
 -- A finished CheckRun's state per conclusion; one not finished is running.
 local RUN_CONCLUSIONS = {
   SUCCESS = "passed",
@@ -165,6 +174,7 @@ function M.parse(reply, ref)
     updated_at = M.epoch(p.updatedAt),
     merge = (state == "open" or state == "draft") and (MERGE_STATES[p.mergeStateStatus] or "unknown")
       or nil,
+    review = M.REVIEW_DECISIONS[p.reviewDecision],
     checks = M.parse_checks(p.commits),
   }
 end

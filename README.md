@@ -82,11 +82,16 @@ own; only the shared toggle and verdict come from triage.
 ## PR buffer
 
 `:NitpickPr [number]` opens a PR (default: the current branch's) as a buffer
-named `nitpick://pr/<owner>/<repo>/<number>`. The title (first line) and the
-description (below the rule) are edited in place; `:w` or `<C-s>` saves them,
-and refuses if GitHub's copy of an edited field changed since the buffer
-loaded. The header shows the state, author, merge state and checks, with each
-failed or running check on its own row: `gd` there opens it.
+named `nitpick://pr/<owner>/<repo>/<number>`. It opens on the stack the PR is
+in: open PRs chained through their base branches, top first, over the branch
+the bottom one merges into (a PR on its own is a stack of one), each row its
+number, title, review decision and checks. The PR's own row holds its title,
+edited in place like the description below the rule; `:w` or `<C-s>` saves
+them, and refuses if GitHub's copy of an edited field changed since the buffer
+loaded. `<CR>` on another row opens that PR (`setup({ on_stack_select })`
+replaces this), `gx` opens it in the browser. Under the stack, the header shows
+the state, author, merge state and checks, each failed or running check on its
+own row: `gd` there opens it.
 
 ## Tests
 
