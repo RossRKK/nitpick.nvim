@@ -1,0 +1,599 @@
+{
+    "data": {
+        "repository": {
+            "pullRequest": {
+                "id": "PR_kwDOAPphoM8AAAABQ3lS2A",
+                "number": 42932,
+                "url": "https://github.com/neovim/neovim/pull/42932",
+                "title": "feat(connect): follow `Include` directives in ssh config",
+                "body": "Problem: `:connect` (no args) doesn't process `Include` directives in ~/.ssh/config, so hosts\ndefined in included files are missing from the menu\n\nSolution: recursively parse included files in `parse_ssh_config()`\n\ncloses: #42931",
+                "state": "MERGED",
+                "isDraft": false,
+                "createdAt": "2026-11-21T10:43:13Z",
+                "updatedAt": "2026-11-22T12:34:43Z",
+                "headRefName": "feat-remotessh-parse-include",
+                "baseRefName": "master",
+                "author": {
+                    "__typename": "User",
+                    "login": "ishianecho"
+                },
+                "mergeable": "UNKNOWN",
+                "mergeStateStatus": "UNKNOWN",
+                "reviewDecision": null,
+                "reviewRequests": {
+                    "nodes": []
+                },
+                "latestReviews": {
+                    "nodes": [
+                        {
+                            "state": "COMMENTED",
+                            "author": {
+                                "login": "justinmk"
+                            },
+                            "onBehalfOf": {
+                                "nodes": []
+                            }
+                        },
+                        {
+                            "state": "APPROVED",
+                            "author": {
+                                "login": "barrettruth"
+                            },
+                            "onBehalfOf": {
+                                "nodes": []
+                            }
+                        }
+                    ]
+                },
+                "comments": {
+                    "nodes": [
+                        {
+                            "id": "IC_kwDOAPphoM8AAAABpTRwGg",
+                            "author": {
+                                "__typename": "User",
+                                "login": "barrettruth"
+                            },
+                            "body": "Actually, should we not at least have a test with symlinked ssh configs? Should we also not have a recursive depth guard? Is this impossible?\r\n\r\nWould really like to not introduce an infinite recursion on _parsing ssh configs_, of all things.",
+                            "createdAt": "2026-11-21T17:39:20Z",
+                            "viewerCanUpdate": false
+                        },
+                        {
+                            "id": "IC_kwDOAPphoM8AAAABpZqdNQ",
+                            "author": {
+                                "__typename": "User",
+                                "login": "ishianecho"
+                            },
+                            "body": "Seems symlinked configs are fine, the man page says \"Files without absolute paths are assumed to be in ~/.ssh if included in a user configuration file\". (Also added a test for this)\r\n\r\nAnyway, seems the failed tests have nothing to do with my changes.",
+                            "createdAt": "2026-11-22T03:07:30Z",
+                            "viewerCanUpdate": false
+                        },
+                        {
+                            "id": "IC_kwDOAPphoM8AAAABpfQR9g",
+                            "author": {
+                                "__typename": "User",
+                                "login": "justinmk"
+                            },
+                            "body": "followup: https://github.com/neovim/neovim/pull/42943",
+                            "createdAt": "2026-11-22T12:34:22Z",
+                            "viewerCanUpdate": false
+                        }
+                    ]
+                },
+                "reviews": {
+                    "nodes": [
+                        {
+                            "id": "PRR_kwDOAPphoM8AAAABZeqFdg",
+                            "author": {
+                                "__typename": "User",
+                                "login": "justinmk"
+                            },
+                            "body": "",
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-11-21T11:14:38Z"
+                        },
+                        {
+                            "id": "PRR_kwDOAPphoM8AAAABZeqb-Q",
+                            "author": {
+                                "__typename": "User",
+                                "login": "justinmk"
+                            },
+                            "body": "",
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-11-21T11:15:45Z"
+                        },
+                        {
+                            "id": "PRR_kwDOAPphoM8AAAABZeqiTA",
+                            "author": {
+                                "__typename": "User",
+                                "login": "justinmk"
+                            },
+                            "body": "",
+                            "state": "APPROVED",
+                            "submittedAt": "2026-11-21T11:16:04Z"
+                        },
+                        {
+                            "id": "PRR_kwDOAPphoM8AAAABZgPlsw",
+                            "author": {
+                                "__typename": "User",
+                                "login": "barrettruth"
+                            },
+                            "body": "",
+                            "state": "APPROVED",
+                            "submittedAt": "2026-11-21T16:13:47Z"
+                        },
+                        {
+                            "id": "PRR_kwDOAPphoM8AAAABZleKGw",
+                            "author": {
+                                "__typename": "User",
+                                "login": "justinmk"
+                            },
+                            "body": "",
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-11-22T11:27:50Z"
+                        }
+                    ]
+                },
+                "reviewThreads": {
+                    "nodes": [
+                        {
+                            "id": "PRRT_kwDOAPphoM66VjF0",
+                            "isResolved": true,
+                            "isOutdated": true,
+                            "path": "test/functional/lua/ssh_spec.lua",
+                            "line": null,
+                            "originalLine": 84,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "id": "PRRC_kwDOAPphoM8AAAABFUqdMA",
+                                        "author": {
+                                            "__typename": "User",
+                                            "login": "justinmk"
+                                        },
+                                        "body": "nit: can drop this, `t.tmpname` paths are cleaned up by the test runner automatically",
+                                        "createdAt": "2026-11-21T11:14:38Z",
+                                        "diffHunk": "@@ -77,6 +77,43 @@ describe('parse_ssh_config()', function()\n     )\n   end)\n \n+  it('parses Include directives', function()\n+    local home = vim.fs.abspath(t.tmpname(false))\n+    n.mkdir_p(home .. '/.ssh')\n+    t.finally(function()\n+      n.rmdir(home)",
+                                        "viewerCanUpdate": false
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "id": "PRRT_kwDOAPphoM66Vjsx",
+                            "isResolved": true,
+                            "isOutdated": true,
+                            "path": "runtime/lua/vim/net/_ssh.lua",
+                            "line": null,
+                            "originalLine": 299,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "id": "PRRC_kwDOAPphoM8AAAABFUqtFg",
+                                        "author": {
+                                            "__typename": "User",
+                                            "login": "justinmk"
+                                        },
+                                        "body": "i just noticed we are hardcoding `~/.ssh` here, that's a bit sus. now that you added another case above, let's declare sth like `ssh_dir` near top of file.",
+                                        "createdAt": "2026-11-21T11:15:45Z",
+                                        "diffHunk": "@@ -276,8 +294,7 @@ function M.parse_config(filename)\n end\n \n ---@param filename? string Path to the SSH config file. Defaults to `~/.ssh/config`.\n----@return string[] The hostnames configured in the SSH config file. Note: This does not process\n----                 `Include` directives.\n+---@return string[] The hostnames configured in the SSH config file.\n function M.get_hosts(filename)\n   filename = filename or vim.fs.normalize('~/.ssh/config')",
+                                        "viewerCanUpdate": false
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "id": "PRRT_kwDOAPphoM66Y81Y",
+                            "isResolved": false,
+                            "isOutdated": false,
+                            "path": "runtime/lua/vim/net/_ssh.lua",
+                            "line": 12,
+                            "originalLine": 12,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "id": "PRRC_kwDOAPphoM8AAAABFV__Gg",
+                                        "author": {
+                                            "__typename": "User",
+                                            "login": "barrettruth"
+                                        },
+                                        "body": "https://web.archive.org/web/20190925004614/https://bugzilla.mindrot.org/show_bug.cgi?id=2050 RIP",
+                                        "createdAt": "2026-11-21T16:13:41Z",
+                                        "diffHunk": "@@ -10,6 +9,7 @@ local M = {}\n \n local whitespace_pattern = '%s'\n local line_break_pattern = '[\\r\\n]'\n+local ssh_dir = '~/.ssh'",
+                                        "viewerCanUpdate": false
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "id": "PRRT_kwDOAPphoM66jM0f",
+                            "isResolved": true,
+                            "isOutdated": true,
+                            "path": "runtime/doc/news.txt",
+                            "line": null,
+                            "originalLine": 330,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "id": "PRRC_kwDOAPphoM8AAAABFaHQXw",
+                                        "author": {
+                                            "__typename": "User",
+                                            "login": "justinmk"
+                                        },
+                                        "body": "unreleased feature so not needed in news\n```suggestion\n```",
+                                        "createdAt": "2026-11-22T11:27:50Z",
+                                        "diffHunk": "@@ -327,6 +327,7 @@ EDITOR\n \u2022 |ZR| restarts Nvim (|:restart|).\n \u2022 |:connect| supports `ssh://` URIs. |remote-ssh|\n \u2022 |:connect| without arguments shows a menu of known servers and ssh hosts.\n+\u2022 |:connect| menu includes ssh hosts defined by `Include` directives.",
+                                        "viewerCanUpdate": false
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "statusCheckRollup": {
+                                    "contexts": {
+                                        "nodes": [
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "lint-commits",
+                                                "status": "COMPLETED",
+                                                "conclusion": "FAILURE",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608121/job/137193223549"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "label",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SKIPPED",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017454440/job/137192746670"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "check",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SKIPPED",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608163/job/137193257841"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "check",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SKIPPED",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45023009967/job/137209866981"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "s390x",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SKIPPED",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608177/job/137193224375"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "s390x",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SKIPPED",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45023009963/job/137209835391"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "request-reviewer",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SKIPPED",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45023009826/job/137209837722"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "Backport Pull Request",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45022938469/job/137209617432"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "Backport Pull Request",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45023009717/job/137209836149"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "old-cmake",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608126/job/137193223790"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "Analyze",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608111/job/137193223643"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "docs",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608079/job/137193223306"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "remove-reviewers",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45022938516/job/137209617517"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "Run zizmor",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608122/job/137193223468"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "lintc",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193223783"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "FreeBSD",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608208/job/137193224355"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "wasmtime",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608110/job/137193223541"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "windows-asan",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SKIPPED",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608177/job/137193250605"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "windows-asan",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SKIPPED",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45023009963/job/137209834913"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "use-existing-src",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608126/job/137193223905"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "no-ai-advertisements",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017454440/job/137192745676"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "lint",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193223921"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "OpenBSD",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608208/job/137193224123"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "request-reviewer",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SKIPPED",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017454440/job/137192746773"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "clang-analyzer",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193223993"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu asan clang unittest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224001"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu asan clang functionaltest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193223919"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu asan clang oldtest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224121"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu tsan clang functionaltest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224105"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu release gcc unittest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224072"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu release gcc functionaltest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224165"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu release gcc oldtest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224127"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu arm clang unittest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224109"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu arm clang functionaltest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224111"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "macos intel clang unittest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224114"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "macos intel clang functionaltest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224131"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "macos intel clang oldtest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224071"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "macos arm clang unittest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224060"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "macos arm clang functionaltest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224142"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "macos arm clang oldtest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224104"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu puc-lua gcc functionaltest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224163"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "ubuntu puc-lua gcc oldtest",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224119"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "build using zig build (linux)",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193223929"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "build using zig build (macos 15)",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193223958"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "build using zig build (windows)",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193223963"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "windows / windows (functional)",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193223982"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "windows / windows (old)",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193224004"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "with-external-deps",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/actions/runs/45017608127/job/137193223986"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "CodeQL",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/runs/137195629843"
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "zizmor",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/neovim/neovim/runs/137193934167"
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}

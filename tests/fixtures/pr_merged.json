@@ -81,6 +81,15 @@
                             }
                         }
                     ]
+                },
+                "comments": {
+                    "nodes": []
+                },
+                "reviews": {
+                    "nodes": []
+                },
+                "reviewThreads": {
+                    "nodes": []
                 }
             }
         }

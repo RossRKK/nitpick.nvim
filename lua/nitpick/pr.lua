@@ -2,6 +2,7 @@
 
 local async = require("nitpick.async")
 local github = require("nitpick.github")
+local timeline = require("nitpick.timeline")
 
 local M = {}
 
@@ -44,9 +45,10 @@ local M = {}
 ---@field merge nitpick.MergeState? nil once merged or closed
 ---@field review nitpick.ReviewDecision?
 ---@field reviewers nitpick.Reviewer[]
+---@field threads nitpick.Thread[] its conversation, the newest activity first
 ---@field checks nitpick.Check[]
 
-M.QUERY = [[
+M.QUERY = ([[
 query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
@@ -61,7 +63,7 @@ query($owner:String!,$name:String!,$number:Int!){
         }
       } }
       latestReviews(first:50){ nodes{ state author{ login } onBehalfOf(first:10){ nodes{ combinedSlug } } } }
-      commits(last:1){ nodes{ commit{ statusCheckRollup{ contexts(first:100){ nodes{
+%s      commits(last:1){ nodes{ commit{ statusCheckRollup{ contexts(first:100){ nodes{
         __typename
         ... on CheckRun{ name status conclusion detailsUrl }
         ... on StatusContext{ context state targetUrl }
@@ -69,7 +71,7 @@ query($owner:String!,$name:String!,$number:Int!){
     }
   }
 }
-]]
+]]):format(timeline.FIELDS)
 
 --- Fetch `ref`. Must run inside a coroutine.
 ---@param ref nitpick.PrRef
@@ -111,6 +113,35 @@ function M.update(id, fields)
     table.concat(inputs, ",")
   )
   local obj = async.sh(vim.list_extend({ "gh", "api", "graphql", "-f", "query=" .. mutation }, values))
+  if obj.code ~= 0 then
+    return false, github.error_text(obj)
+  end
+  return true
+end
+
+-- Each way of writing a comment: the mutation, and the input field naming what it writes to.
+local COMMENT_MUTATIONS = {
+  new = { "addComment", "subjectId" },
+  reply = { "addPullRequestReviewThreadReply", "pullRequestReviewThreadId" },
+  pr = { "updateIssueComment", "id" },
+  review_comment = { "updatePullRequestReviewComment", "pullRequestReviewCommentId" },
+}
+
+--- Write `body` as a comment: `how` is "new" (on the PR with node id `id`),
+--- "reply" (to the review thread `id`), or a comment kind (editing comment `id`).
+--- Must run inside a coroutine.
+---@param how "new"|"reply"|nitpick.CommentKind
+---@param id string
+---@param body string
+---@return boolean ok, string? err
+function M.write_comment(how, id, body)
+  local mutation, field = unpack(COMMENT_MUTATIONS[how])
+  local query = ("mutation($id:ID!,$body:String!){ %s(input:{%s:$id,body:$body}){ clientMutationId } }"):format(
+    mutation,
+    field
+  )
+  -- stylua: ignore
+  local obj = async.sh({ "gh", "api", "graphql", "-f", "query=" .. query, "-f", "id=" .. id, "-f", "body=" .. body })
   if obj.code ~= 0 then
     return false, github.error_text(obj)
   end
@@ -194,6 +225,7 @@ function M.parse(reply, ref)
       or nil,
     review = M.REVIEW_DECISIONS[p.reviewDecision],
     reviewers = M.parse_reviewers(p),
+    threads = timeline.parse(p, M.epoch),
     checks = M.parse_checks(p.commits),
   }
 end

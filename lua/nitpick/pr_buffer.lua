@@ -1,18 +1,24 @@
 -- A PR as an editable buffer (nitpick://pr/<owner>/<name>/<number>): the
 -- stack it is in as its title block, the PR's own row holding its editable
 -- title, then a header of its state, author, reviewers, merge state and checks, then its
--- editable description. :w (or <C-s>) saves the title and description to GitHub.
+-- editable description, then its conversation, your comments editable too. :w
+-- (or <C-s>) saves those edits to GitHub.
 
 local async = require("nitpick.async")
 local branch_pr = require("nitpick.branch_pr")
 local checkout = require("nitpick.checkout")
+local compose = require("nitpick.compose")
+local timeline = require("nitpick.timeline")
 
 local M = {}
+
+local write, spanning -- defined below their callers
 
 ---@class nitpick.PrClient
 ---@field fetch fun(ref: nitpick.PrRef): nitpick.Pr?, string?
 ---@field update fun(id: string, fields: { title: string?, body: string? }): boolean, string?
 ---@field stack fun(ref: nitpick.PrRef, current: nitpick.StackPr): nitpick.Stack?
+---@field write_comment fun(how: "new"|"reply"|nitpick.CommentKind, id: string, body: string): boolean, string?
 
 ---@class nitpick.PrBufferState
 ---@field ref nitpick.PrRef
@@ -20,6 +26,9 @@ local M = {}
 ---@field pr nitpick.Pr? as last loaded, what edits are measured against
 ---@field check_urls table<integer, string> check row's extmark id -> its URL
 ---@field stack_rows table<integer, nitpick.StackPr> stack row's extmark id -> its PR
+---@field threads table<integer, nitpick.Thread> a thread's extmark id -> it
+---@field comments table<integer, nitpick.Comment> a comment's extmark id -> it
+---@field editable { comment: nitpick.Comment, above: integer, below: integer }[] your comments, by the marks on the rows bounding their bodies
 
 ---@type table<integer, nitpick.PrBufferState>
 local states = {}
@@ -30,21 +39,33 @@ local select_stack_pr = function(ref)
   vim.cmd.edit(vim.fn.fnameescape(M.uri(ref)))
 end
 
+-- Setup's choices: the keys that reply to and add a comment, and the bots whose comments still show.
+local keys = { reply = "<leader>ra", comment = "<leader>rc" }
+local shown_bots = {} ---@type table<string, boolean>
+
 local ns = vim.api.nvim_create_namespace("nitpick_pr")
 -- Marks with no highlight that follow edits: the rows bounding the title and
 -- the body, and the check and stack rows.
 local ns_regions = vim.api.nvim_create_namespace("nitpick_pr_regions")
 local ns_checks = vim.api.nvim_create_namespace("nitpick_pr_checks")
 local ns_stack = vim.api.nvim_create_namespace("nitpick_pr_stack")
+local ns_threads = vim.api.nvim_create_namespace("nitpick_pr_threads")
+local ns_comments = vim.api.nvim_create_namespace("nitpick_pr_comments")
+local ns_bounds = vim.api.nvim_create_namespace("nitpick_pr_comment_bounds")
 
 local URI_PREFIX = "nitpick://pr/"
-local HEADER_END, ABOVE_TITLE, BELOW_TITLE = 1, 2, 3
+local HEADER_END, ABOVE_TITLE, BELOW_TITLE, CONVERSATION = 1, 2, 3, 4
 
 --- The GitHub client PR buffers use outside the specs.
 ---@return nitpick.PrClient
 function M.github_client()
   local pr = require("nitpick.pr")
-  return { fetch = pr.fetch, update = pr.update, stack = require("nitpick.stack").fetch }
+  return {
+    fetch = pr.fetch,
+    update = pr.update,
+    stack = require("nitpick.stack").fetch,
+    write_comment = pr.write_comment,
+  }
 end
 
 --- Open PR `number`, or the current branch's, in the current window.
@@ -102,7 +123,7 @@ end
 ---@param ref nitpick.PrRef
 ---@param client nitpick.PrClient
 function M.attach(buf, ref, client)
-  states[buf] = { ref = ref, client = client, check_urls = {}, stack_rows = {} }
+  states[buf] = { ref = ref, client = client, check_urls = {}, stack_rows = {}, threads = {}, comments = {}, editable = {} }
   vim.bo[buf].buftype = "acwrite"
   vim.bo[buf].swapfile = false
   vim.bo[buf].filetype = "markdown"
@@ -139,6 +160,15 @@ function M.attach(buf, ref, client)
       vim.cmd("normal! \r")
     end
   end, { buffer = buf, desc = "Go to the stack's PR under the cursor" })
+  local function map(action, fn, desc)
+    if keys[action] and keys[action] ~= "" then
+      vim.keymap.set("n", keys[action], function()
+        fn(buf, vim.fn.line("."))
+      end, { buffer = buf, desc = desc })
+    end
+  end
+  map("reply", M.reply, "Reply to the PR thread under the cursor")
+  map("comment", M.new_comment, "Comment on the PR")
   local gx = vim.fn.maparg("gx", "n", false, true)
   vim.keymap.set("n", "gx", function()
     local row = M.stack_pr(buf, vim.fn.line("."))
@@ -176,8 +206,8 @@ function M.load(buf)
   end)
 end
 
---- Save `buf`'s title and description edits to GitHub, refusing when GitHub's
---- copy of an edited field changed since the buffer loaded.
+--- Save `buf`'s edits to its title, description and your comments to GitHub,
+--- refusing when GitHub's copy of any of them changed since the buffer loaded.
 ---@param buf integer
 function M.save(buf)
   local state = states[buf]
@@ -192,12 +222,21 @@ function M.save(buf)
   if edits.body ~= state.pr.body then
     fields.body = edits.body
   end
-  if not next(fields) then
+  local comments = vim.tbl_filter(function(e)
+    return e.body ~= e.comment.body
+  end, edits.comments)
+  if not next(fields) and #comments == 0 then
     vim.bo[buf].modified = false
     return
   end
   if fields.title == "" then
     vim.notify("nitpick: a PR needs a title", vim.log.levels.WARN)
+    return
+  end
+  if vim.iter(comments):any(function(e)
+    return vim.trim(e.body) == ""
+  end) then
+    vim.notify("nitpick: a comment can't be emptied; delete it on GitHub", vim.log.levels.WARN)
     return
   end
   async.run(function()
@@ -206,39 +245,113 @@ function M.save(buf)
       vim.notify("nitpick: couldn't check the PR before saving: " .. tostring(err), vim.log.levels.ERROR)
       return
     end
-    local changed = M.changed_upstream(state.pr, fresh, fields)
+    local changed = M.changed_upstream(state.pr, fresh, fields, comments)
     if #changed > 0 then
       vim.notify(
-        ("nitpick: not saved, the PR's %s changed on GitHub since it loaded. Copy your edits, then :e! to reload"):format(
+        ("nitpick: not saved, %s changed on GitHub since it loaded. Copy your edits, then :e! to reload"):format(
           table.concat(changed, " and ")
         ),
         vim.log.levels.WARN
       )
       return
     end
-    local ok, update_err = state.client.update(fresh.id, fields)
-    if not ok then
-      vim.notify("nitpick: save failed: " .. tostring(update_err), vim.log.levels.ERROR)
-      return
+    if next(fields) then
+      local ok, update_err = state.client.update(fresh.id, fields)
+      if not ok then
+        vim.notify("nitpick: save failed: " .. tostring(update_err), vim.log.levels.ERROR)
+        return
+      end
+    end
+    for _, e in ipairs(comments) do
+      local ok, write_err = state.client.write_comment(e.comment.kind, e.comment.id, e.body)
+      if not ok then
+        vim.notify("nitpick: saving a comment failed: " .. tostring(write_err), vim.log.levels.ERROR)
+        return
+      end
     end
     vim.notify("nitpick: PR saved")
     M.load(buf)
   end)
 end
 
---- The fields among `fields` whose GitHub copy differs between `loaded` and `fresh`.
+--- What among the edited `fields` and `comments` GitHub's copy changed of between `loaded` and `fresh`.
 ---@param loaded nitpick.Pr
 ---@param fresh nitpick.Pr
 ---@param fields { title: string?, body: string? }
+---@param comments { comment: nitpick.Comment, body: string }[]
 ---@return string[]
-function M.changed_upstream(loaded, fresh, fields)
+function M.changed_upstream(loaded, fresh, fields, comments)
   local changed = {}
   for _, field in ipairs({ "title", "body" }) do
     if fields[field] and loaded[field] ~= fresh[field] then
-      changed[#changed + 1] = field == "body" and "description" or field
+      changed[#changed + 1] = field == "body" and "the description" or "the title"
+    end
+  end
+  local fresh_bodies = {}
+  for _, t in ipairs(fresh.threads) do
+    for _, c in ipairs(t.comments) do
+      fresh_bodies[c.id] = c.body
+    end
+  end
+  for _, e in ipairs(comments) do
+    if fresh_bodies[e.comment.id] ~= e.comment.body then
+      changed[#changed + 1] = "a comment of yours"
     end
   end
   return changed
+end
+
+--- Reply to the thread on 1-based `row` of `buf`: in it for a thread on the
+--- code, else a new comment on the PR addressed to the comment's author.
+---@param buf integer
+---@param row integer
+function M.reply(buf, row)
+  local thread = M.thread_at(buf, row)
+  if not thread then
+    vim.notify("nitpick: no comment here to reply to", vim.log.levels.INFO)
+    return
+  end
+  if thread.kind == "inline" then
+    write(buf, ("Reply on %s"):format(thread.path), nil, "reply", thread.id)
+  else
+    local login = thread.comments[1].author.login
+    write(buf, "Reply to @" .. login, { "@" .. login .. " " }, "new", states[buf].pr.id)
+  end
+end
+
+--- Comment on `buf`'s PR.
+---@param buf integer
+function M.new_comment(buf)
+  local pr = states[buf].pr
+  if pr then
+    write(buf, ("Comment on #%d"):format(pr.ref.number), nil, "new", pr.id)
+  end
+end
+
+--- Open the compose box titled `title`, holding `initial`, and write what is
+--- sent through `buf`'s client as `how` on `id`, then reload unless edits are unsaved.
+---@param buf integer
+---@param title string
+---@param initial string[]?
+---@param how "new"|"reply"|nitpick.CommentKind
+---@param id string
+function write(buf, title, initial, how, id)
+  compose.open_input(title, initial, function(body, close)
+    async.run(function()
+      local ok, err = states[buf].client.write_comment(how, id, body)
+      if not ok then
+        vim.notify("nitpick: comment failed: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      close()
+      if vim.bo[buf].modified then
+        vim.notify("nitpick: comment sent; :w your edits, then :e to see it")
+      else
+        vim.notify("nitpick: comment sent")
+        M.load(buf)
+      end
+    end)
+  end)
 end
 
 --- Replace `buf`'s text with `pr` in `stack`, as of `now` (epoch seconds).
@@ -247,9 +360,9 @@ end
 ---@param stack nitpick.Stack
 ---@param now integer
 function M.render(buf, pr, stack, now)
-  local layout = M.layout(pr, stack, now)
+  local layout = M.layout(pr, stack, now, shown_bots)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, layout.lines)
-  for _, space in ipairs({ ns, ns_regions, ns_checks, ns_stack }) do
+  for _, space in ipairs({ ns, ns_regions, ns_checks, ns_stack, ns_threads, ns_comments, ns_bounds }) do
     vim.api.nvim_buf_clear_namespace(buf, space, 0, -1)
   end
   for _, h in ipairs(layout.highlights) do
@@ -268,6 +381,34 @@ function M.render(buf, pr, stack, now)
     id = HEADER_END,
     virt_lines = { { { "" } }, { { ("─"):rep(60), "NitpickPrRule" } }, { { "" } } },
   })
+  vim.api.nvim_buf_set_extmark(buf, ns_regions, layout.conversation_row - 1, 0, {
+    id = CONVERSATION,
+    virt_lines = { { { "" } }, { { ("─"):rep(60), "NitpickPrRule" } }, { { "" } } },
+    virt_lines_above = true,
+  })
+  local function spans(space, list)
+    local by_id = {}
+    for _, span in ipairs(list) do
+      local last = layout.lines[span[2]]
+      by_id[vim.api.nvim_buf_set_extmark(buf, space, span[1] - 1, 0, { end_row = span[2] - 1, end_col = #last })] =
+        span[3]
+    end
+    return by_id
+  end
+  states[buf].threads = spans(ns_threads, layout.threads)
+  states[buf].comments = spans(ns_comments, layout.comments)
+  -- A comment's body is the lines between its author row and the row after it, as the title's is.
+  states[buf].editable = {}
+  for _, span in ipairs(layout.comments) do
+    local c = span[3]
+    if c.can_edit and c.kind then
+      table.insert(states[buf].editable, {
+        comment = c,
+        above = vim.api.nvim_buf_set_extmark(buf, ns_bounds, span[1] - 1, 0, {}),
+        below = vim.api.nvim_buf_set_extmark(buf, ns_bounds, span[2], 0, {}),
+      })
+    end
+  end
   local check_urls, stack_rows = {}, {}
   for row, url in pairs(layout.check_urls) do
     check_urls[vim.api.nvim_buf_set_extmark(buf, ns_checks, row - 1, 0, {})] = url
@@ -282,9 +423,10 @@ function M.render(buf, pr, stack, now)
 end
 
 --- The title and description as `buf` holds them now: every line between the
---- stack rows around the PR's own, and every line after the header.
+--- stack rows around the PR's own, every line between the header and the conversation,
+--- and each of your comments' lines between its author row and the row after.
 ---@param buf integer
----@return { title: string, body: string }
+---@return { title: string, body: string, comments: { comment: nitpick.Comment, body: string }[] }
 function M.edits(buf)
   local function mark_row(id)
     return vim.api.nvim_buf_get_extmark_by_id(buf, ns_regions, id, {})[1]
@@ -293,7 +435,12 @@ function M.edits(buf)
   local title_lines = vim.api.nvim_buf_get_lines(buf, above and above + 1 or 0, mark_row(BELOW_TITLE), false)
   return {
     title = vim.trim(table.concat(title_lines, " ")),
-    body = table.concat(vim.api.nvim_buf_get_lines(buf, mark_row(HEADER_END) + 1, -1, false), "\n"),
+    body = table.concat(vim.api.nvim_buf_get_lines(buf, mark_row(HEADER_END) + 1, mark_row(CONVERSATION), false), "\n"),
+    comments = vim.tbl_map(function(e)
+      local first = vim.api.nvim_buf_get_extmark_by_id(buf, ns_bounds, e.above, {})[1] + 1
+      local after = vim.api.nvim_buf_get_extmark_by_id(buf, ns_bounds, e.below, {})[1]
+      return { comment = e.comment, body = table.concat(vim.api.nvim_buf_get_lines(buf, first, after, false), "\n") }
+    end, states[buf].editable),
   }
 end
 
@@ -315,6 +462,34 @@ end
 ---@return string?
 function M.check_url(buf, row)
   return states[buf] and on_row(buf, ns_checks, states[buf].check_urls, row)
+end
+
+--- The thread drawn across 1-based `row` of `buf`, if one is.
+---@param buf integer
+---@param row integer
+---@return nitpick.Thread?
+function M.thread_at(buf, row)
+  return states[buf] and spanning(buf, ns_threads, states[buf].threads, row)
+end
+
+--- The comment drawn across 1-based `row` of `buf`, if one is.
+---@param buf integer
+---@param row integer
+---@return nitpick.Comment?
+function M.comment_at(buf, row)
+  return states[buf] and spanning(buf, ns_comments, states[buf].comments, row)
+end
+
+--- The entry `marks` holds for the mark in namespace `space` spanning 1-based `row` of `buf`.
+---@generic T
+---@param buf integer
+---@param space integer
+---@param marks table<integer, T>
+---@param row integer
+---@return T?
+function spanning(buf, space, marks, row)
+  local mark = vim.api.nvim_buf_get_extmarks(buf, space, { row - 1, 0 }, { row - 1, -1 }, { overlap = true })[1]
+  return mark and marks[mark[1]]
 end
 
 --- The stack's PR drawn on 1-based `row` of `buf`, if one is.
@@ -348,6 +523,9 @@ end
 ---@field body_row integer
 ---@field check_urls table<integer, string> row -> the check drawn there
 ---@field stack_rows table<integer, nitpick.StackPr> row -> the stack's PR drawn there
+---@field conversation_row integer
+---@field threads { [1]: integer, [2]: integer, [3]: nitpick.Thread }[] first and last row of each thread drawn
+---@field comments { [1]: integer, [2]: integer, [3]: nitpick.Comment }[] first and last row of each comment drawn
 
 local STATE_TEXT = {
   open = { "Open", "NitpickPrOpen" },
@@ -392,15 +570,20 @@ for _, s in ipairs(CHECK_STATES) do
   CHECK_GLYPHS[s[1]] = { s[2], s[3] }
 end
 
+-- A diff line's highlight by its first character.
+local DIFF_HL = { ["+"] = "DiffAdd", ["-"] = "DiffDelete" }
+
 -- Checks listed one per row: those needing attention. The rest are only counted.
 local LISTED = { failed = true, running = true }
 
---- `pr` in `stack` laid out as the buffer shows it, as of `now`.
+--- `pr` in `stack` laid out as the buffer shows it, as of `now`, the comments of
+--- bots not among `show_bots` left out.
 ---@param pr nitpick.Pr
 ---@param stack nitpick.Stack
 ---@param now integer epoch seconds
+---@param show_bots table<string, boolean>
 ---@return nitpick.PrLayout
-function M.layout(pr, stack, now)
+function M.layout(pr, stack, now, show_bots)
   local lines, highlights, decorations, check_urls, stack_rows = {}, {}, {}, {}, {}
   local function row(chunks)
     local text = ""
@@ -507,6 +690,55 @@ function M.layout(pr, stack, now)
 
   local body_row = #lines + 1
   vim.list_extend(lines, vim.split(pr.body, "\n", { plain = true }))
+
+  local threads, hidden, bots = timeline.without_bots(pr.threads, show_bots)
+  local conversation_row = #lines + 1
+  local thread_spans, comment_spans = {}, {}
+  local heading = { { ("Conversation \u{b7} %d thread%s"):format(#threads, #threads == 1 and "" or "s"), "NitpickPrLabel" } }
+  if hidden > 0 then
+    heading[2] = { (" \u{b7} %d by bots hidden (%s)"):format(hidden, table.concat(bots, ", ")), "Comment" }
+  end
+  row(heading)
+  for _, t in ipairs(threads) do
+    row({})
+    local start = #lines + 1
+    if t.kind == "inline" then
+      local tags = {}
+      if t.outdated then
+        tags[#tags + 1] = "outdated"
+      end
+      if t.resolved then
+        tags[#tags + 1] = ("resolved, %d comment%s"):format(#t.comments, #t.comments == 1 and "" or "s")
+      end
+      row({
+        { t.path .. (t.line and (":" .. t.line) or ""), "NitpickPrPath" },
+        { #tags > 0 and ("  " .. table.concat(tags, " \u{b7} ")) or "", "Comment" },
+      })
+    end
+    -- GitHub hides a resolved thread behind its file and line; so does this.
+    if not t.resolved then
+      for _, h in ipairs(t.hunk or {}) do
+        -- Behind a bar, so markdown never reads a removed line as a list item.
+        row({ { "\u{2502} ", "Comment" }, { h, DIFF_HL[h:sub(1, 1)] } })
+      end
+      for _, c in ipairs(t.comments) do
+        local comment_start = #lines + 1
+        local verdict = t.kind == "review" and REVIEWER_STATES[t.review_state]
+        row({
+          { "@" .. c.author.login .. (c.author.is_bot and " (bot)" or ""), "NitpickPrAuthor" },
+          { "  " .. M.ago(now - c.created_at), "Comment" },
+          verdict and { "  " .. verdict[3], verdict[2] } or { "" },
+        })
+        if c.body ~= "" then
+          vim.list_extend(lines, vim.split(c.body, "\n", { plain = true }))
+        end
+        comment_spans[#comment_spans + 1] = { comment_start, #lines, c }
+      end
+    end
+    thread_spans[#thread_spans + 1] = { start, #lines, t }
+  end
+  -- Every comment has a row after it, the last one too, to bound its body.
+  row({})
   return {
     lines = lines,
     highlights = highlights,
@@ -515,6 +747,9 @@ function M.layout(pr, stack, now)
     body_row = body_row,
     check_urls = check_urls,
     stack_rows = stack_rows,
+    conversation_row = conversation_row,
+    threads = thread_spans,
+    comments = comment_spans,
   }
 end
 
@@ -542,10 +777,22 @@ function M.ago(seconds)
 end
 
 --- Register the PR buffers' name scheme, :NitpickPr and their highlights.
----@param opts { on_stack_select: fun(ref: nitpick.PrRef, row: nitpick.StackPr)? }
+---@param opts { on_stack_select: fun(ref: nitpick.PrRef, row: nitpick.StackPr)?, keys: table<string, string|false>?, show_bots: string[]? }
+---   on_stack_select  what <CR> on another PR's row of the stack does
+---   keys             nitpick's keys: reply and comment are bound in PR buffers too
+---   show_bots        logins of bots whose comments show; every other bot's are hidden
 function M.setup(opts)
   if opts.on_stack_select then
     select_stack_pr = opts.on_stack_select
+  end
+  for _, action in ipairs({ "reply", "comment" }) do
+    if opts.keys and opts.keys[action] ~= nil then
+      keys[action] = opts.keys[action]
+    end
+  end
+  shown_bots = {}
+  for _, login in ipairs(opts.show_bots or {}) do
+    shown_bots[login] = true
   end
   local function set_hl()
     for group, link in pairs({
@@ -561,6 +808,7 @@ function M.setup(opts)
       NitpickPrAuthor = "Title",
       NitpickPrRule = "Comment",
       NitpickPrCodeOwner = "Special",
+      NitpickPrPath = "Directory",
     }) do
       vim.api.nvim_set_hl(0, group, { link = link, default = true })
     end

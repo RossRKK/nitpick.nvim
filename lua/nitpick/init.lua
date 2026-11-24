@@ -1688,12 +1688,13 @@ local default_keys = {
 }
 
 --- Configure nitpick.nvim.
----@param opts? { verdict?: fun(): ("APPROVE"|"REQUEST_CHANGES"|"COMMENT"|nil), keys?: table<string, string|false>, yank_register?: string, on_stack_select?: fun(ref: nitpick.PrRef, row: nitpick.StackPr) }
+---@param opts? { verdict?: fun(): ("APPROVE"|"REQUEST_CHANGES"|"COMMENT"|nil), keys?: table<string, string|false>, yank_register?: string, on_stack_select?: fun(ref: nitpick.PrRef, row: nitpick.StackPr), show_bots?: string[] }
 ---   verdict        status source for submit's review event; nil prompts via a picker.
 ---                  Wire it to triage.nvim's verdict to infer the event from triage.
 ---   keys           per-action left-hand side; see default_keys. false/"" disables one.
 ---   yank_register  register M.yank_drafts writes to; defaults to "+" (system clipboard).
 ---   on_stack_select  what <CR> on another PR's row of a PR buffer's stack does; defaults to opening it there.
+---   show_bots      logins of bots whose comments a PR buffer shows; every other bot's are hidden.
 function M.setup(opts)
   M.opts = opts or {}
   local function set_hl()
@@ -1842,7 +1843,11 @@ function M.setup(opts)
     { desc = "Show/hide this repo's PR comments in review mode (drafts always show)" }
   )
 
-  require("nitpick.pr_buffer").setup({ on_stack_select = M.opts.on_stack_select })
+  require("nitpick.pr_buffer").setup({
+    on_stack_select = M.opts.on_stack_select,
+    keys = keys,
+    show_bots = M.opts.show_bots,
+  })
 end
 
 return M

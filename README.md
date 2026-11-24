@@ -94,6 +94,15 @@ the state, author, reviewers (as GitHub's Reviewers panel lists them, code
 owners shielded), merge state and checks, each failed or running check on its
 own row: `gd` there opens it.
 
+Under the description, the conversation: comments on the PR, reviews' summaries
+and threads on the code (file and line, then the end of the diff hunk), the
+newest activity first; GitHub's resolved threads collapse to their file and line,
+and threads only bots wrote are hidden (`setup({ show_bots = { "login" } })`
+keeps a bot's). Your own comments edit in place like the description, saved by
+the same `:w`. `<leader>ra` on a thread replies (in the thread for one on the
+code, else as a comment on the PR to its author), `<leader>rc` comments on the
+PR, both in the compose box.
+
 ## Tests
 
 ```bash

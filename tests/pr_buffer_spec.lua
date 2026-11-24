@@ -28,6 +28,7 @@ local function make_pr(fields)
     merge = "clean",
     reviewers = {},
     checks = {},
+    threads = {},
   }, fields or {})
 end
 
@@ -59,6 +60,60 @@ local function virt(layout, row)
   return out
 end
 
+--- A comment by `login` `ago` seconds before NOW.
+local function comment(login, ago, fields)
+  return vim.tbl_extend("force", {
+    id = "C_" .. login .. ago,
+    kind = "pr",
+    author = { login = login, is_bot = false },
+    body = "Said " .. login .. ".",
+    created_at = NOW - ago,
+    can_edit = false,
+  }, fields or {})
+end
+
+--- A PR with a conversation: your comment, an inline thread on the code, a resolved one and a bot's comment.
+local function conversation()
+  local mine = comment("ross", 60, { can_edit = true, body = "My first line.\nMy second line." })
+  return make_pr({
+    threads = {
+      { kind = "comment", comments = { mine }, latest = mine.created_at, resolved = false, outdated = false },
+      {
+        kind = "inline",
+        id = "T_1",
+        path = "lua/x.lua",
+        line = 12,
+        hunk = { " local a = 1", "+local b = 2" },
+        comments = {
+          comment("bob", 3600, { kind = "review_comment", body = "Why b?" }),
+          comment("ross", 1800, { kind = "review_comment", can_edit = true, body = "Because." }),
+        },
+        latest = NOW - 1800,
+        resolved = false,
+        outdated = false,
+      },
+      {
+        kind = "inline",
+        id = "T_2",
+        path = "lua/y.lua",
+        line = 3,
+        hunk = { "-gone" },
+        comments = { comment("bob", 7200, { kind = "review_comment" }) },
+        latest = NOW - 7200,
+        resolved = true,
+        outdated = false,
+      },
+      {
+        kind = "comment",
+        comments = { comment("mergify", 9000, { author = { login = "mergify", is_bot = true } }) },
+        latest = NOW - 9000,
+        resolved = false,
+        outdated = false,
+      },
+    },
+  })
+end
+
 describe("pr_buffer.layout", function()
   it("is a stack of one over its base, then the header, then the description", function()
     local layout = pr_buffer.layout(make_pr(), alone(make_pr()), NOW)
@@ -74,6 +129,8 @@ describe("pr_buffer.layout", function()
       "Why.",
       "",
       "How.",
+      "Conversation \u{b7} 0 threads",
+      "",
     }, layout.lines)
     assert.equals(1, layout.title_row)
     assert.equals(9, layout.body_row)
@@ -82,7 +139,7 @@ describe("pr_buffer.layout", function()
 
   it("draws the stack top first, the PR's own row its title, each row its number and status", function()
     local p = make_pr({ base = "ground" })
-    local layout = pr_buffer.layout(p, stacked(p), NOW)
+    local layout = pr_buffer.layout(p, stacked(p), NOW, {})
     assert.same({ "Use the thing", "Add the thing", "Lay the ground", "\u{2570} main" }, vim.list_slice(layout.lines, 1, 4))
     assert.equals(2, layout.title_row)
     assert.equals("\u{25cb} #9  ", virt(layout, 1).inline)
@@ -101,7 +158,7 @@ describe("pr_buffer.layout", function()
         { name = "lint", state = "failed", url = "u-lint" },
       },
     })
-    local layout = pr_buffer.layout(p, alone(p), NOW)
+    local layout = pr_buffer.layout(p, alone(p), NOW, {})
     assert.equals("Checks: 1 failed \u{b7} 1 running \u{b7} 1 skipped \u{b7} 1 passed", layout.lines[8])
     assert.equals("  \u{2717} lint", layout.lines[9])
     assert.equals("  \u{25cf} slow", layout.lines[10])
@@ -112,10 +169,42 @@ describe("pr_buffer.layout", function()
   it("drops the merge row once merged, and marks a bot author", function()
     local merged = make_pr({ state = "merged", author = { login = "mergify", is_bot = true } })
     merged.merge = nil
-    local layout = pr_buffer.layout(merged, alone(merged), NOW)
+    local layout = pr_buffer.layout(merged, alone(merged), NOW, {})
     assert.equals("Status: Merged  main \u{2190} feat", layout.lines[4])
     assert.matches("^Author: @mergify %(bot%)", layout.lines[5])
     assert.equals("Checks: none", layout.lines[7])
+  end)
+
+  it("lays the conversation out under the description, the code a thread is on above it, resolved ones collapsed", function()
+    local p = conversation()
+    local layout = pr_buffer.layout(p, alone(p), NOW, {})
+    local from = layout.conversation_row
+    assert.same({
+      "Conversation \u{b7} 3 threads \u{b7} 1 by bots hidden (mergify)",
+      "",
+      "@ross  1 minute ago",
+      "My first line.",
+      "My second line.",
+      "",
+      "lua/x.lua:12",
+      "\u{2502}  local a = 1",
+      "\u{2502} +local b = 2",
+      "@bob  1 hour ago",
+      "Why b?",
+      "@ross  30 minutes ago",
+      "Because.",
+      "",
+      "lua/y.lua:3  resolved, 1 comment",
+      "",
+    }, vim.list_slice(layout.lines, from))
+    assert.same({ from + 2, from + 4 }, { layout.comments[1][1], layout.comments[1][2] })
+    assert.same({ from + 6, from + 12 }, { layout.threads[2][1], layout.threads[2][2] })
+  end)
+
+  it("shows a bot's comments when asked to", function()
+    local p = conversation()
+    local layout = pr_buffer.layout(p, alone(p), NOW, { mergify = true })
+    assert.equals("Conversation \u{b7} 4 threads", layout.lines[layout.conversation_row])
   end)
 
   it("lists the reviewers under one label, names aligned, code owners shielded, a review's teams after it", function()
@@ -125,7 +214,7 @@ describe("pr_buffer.layout", function()
         { name = "bob", kind = "user", code_owner = false, state = "approved", on_behalf_of = { "acme/web" } },
       },
     })
-    local layout = pr_buffer.layout(p, alone(p), NOW)
+    local layout = pr_buffer.layout(p, alone(p), NOW, {})
     assert.equals("Reviewers: \u{25cf} acme/devs \u{f132}  pending", layout.lines[6])
     assert.equals("           \u{2713} bob" .. (" "):rep(10) .. "approved  for acme/web", layout.lines[7])
   end)
@@ -179,6 +268,17 @@ describe("a PR buffer", function()
       stack = function()
         return github.stack and github.stack(github.pr) or nil
       end,
+      write_comment = function(how, id, body)
+        updates[#updates + 1] = { how = how, id = id, body = body }
+        for _, t in ipairs(github.pr.threads) do
+          for _, c in ipairs(t.comments) do
+            if c.id == id then
+              c.body = body
+            end
+          end
+        end
+        return true
+      end,
     },
       updates
   end
@@ -209,8 +309,8 @@ describe("a PR buffer", function()
   it("saves an edited description, and only that, with :w", function()
     local github = { pr = make_pr() }
     local buf, updates = attached(github)
-    local last = vim.api.nvim_buf_line_count(buf)
-    vim.api.nvim_buf_set_lines(buf, last - 1, last, false, { "How, better.", "And more." })
+    local how = vim.fn.search([[^How\.$]], "n")
+    vim.api.nvim_buf_set_lines(buf, how - 1, how, false, { "How, better.", "And more." })
     vim.cmd.write()
     assert.same({ { id = "PR_1", fields = { body = "Why.\n\nHow, better.\nAnd more." } } }, updates)
     assert.equals("Why.\n\nHow, better.\nAnd more.", github.pr.body)
@@ -239,10 +339,11 @@ describe("a PR buffer", function()
     local github = { pr = make_pr() }
     local buf, updates = attached(github)
     github.pr.body = "Someone else's words."
-    vim.api.nvim_buf_set_lines(buf, -2, -1, false, { "Mine." })
+    local how = vim.fn.search([[^How\.$]], "n")
+    vim.api.nvim_buf_set_lines(buf, how - 1, how, false, { "Mine." })
     pr_buffer.save(buf)
     assert.same({}, updates)
-    assert.matches("description changed on GitHub", notified[#notified].msg)
+    assert.matches("the description changed on GitHub", notified[#notified].msg)
     assert.is_true(vim.bo[buf].modified, "the edits stay in the buffer")
   end)
 
@@ -303,6 +404,116 @@ describe("a PR buffer", function()
     vim.api.nvim_win_set_cursor(0, { 1, 0 })
     vim.cmd("normal \r")
     assert.same({ ref = { owner = "o", name = "r", number = 9 }, title = "Use the thing" }, chosen)
+  end)
+end)
+
+describe("a PR buffer's conversation", function()
+  local notified, notify
+  before_each(function()
+    notified, notify = {}, vim.notify
+    vim.notify = function(msg, level)
+      notified[#notified + 1] = { msg = msg, level = level }
+    end
+  end)
+  after_each(function()
+    vim.notify = notify
+  end)
+
+  --- A buffer on `github`'s PR, and the writes made through its client.
+  local function attached(github)
+    local buf = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(buf, pr_buffer.uri(github.pr.ref) .. "-c" .. buf)
+    vim.api.nvim_win_set_buf(0, buf)
+    local writes = {}
+    pr_buffer.attach(buf, github.pr.ref, {
+      fetch = function()
+        return vim.deepcopy(github.pr)
+      end,
+      update = function()
+        return true
+      end,
+      stack = function()
+        return nil
+      end,
+      write_comment = function(how, id, body)
+        writes[#writes + 1] = { how = how, id = id, body = body }
+        return true
+      end,
+    })
+    return buf, writes
+  end
+
+  --- The 1-based row of the first line reading `text`.
+  local function row_of(buf, text)
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+      if l == text then
+        return i
+      end
+    end
+    error("no line " .. text)
+  end
+
+  it("saves an edit to your comment in place, the line replaced and another added", function()
+    local buf, writes = attached({ pr = conversation() })
+    local second = row_of(buf, "My second line.")
+    vim.api.nvim_buf_set_lines(buf, second - 1, second, false, { "My better line.", "And one more." })
+    pr_buffer.save(buf)
+    assert.same({ { how = "pr", id = "C_ross60", body = "My first line.\nMy better line.\nAnd one more." } }, writes)
+  end)
+
+  it("saves your reply in a thread on the code as a review comment", function()
+    local buf, writes = attached({ pr = conversation() })
+    local because = row_of(buf, "Because.")
+    vim.api.nvim_buf_set_lines(buf, because - 1, because, false, { "Because a needs company." })
+    pr_buffer.save(buf)
+    assert.same({ { how = "review_comment", id = "C_ross1800", body = "Because a needs company." } }, writes)
+  end)
+
+  it("leaves someone else's comment alone when its lines are edited", function()
+    local buf, writes = attached({ pr = conversation() })
+    local why = row_of(buf, "Why b?")
+    vim.api.nvim_buf_set_lines(buf, why - 1, why, false, { "Rewritten." })
+    pr_buffer.save(buf)
+    assert.same({}, writes)
+  end)
+
+  it("refuses to save over your comment changed on GitHub since it loaded", function()
+    local github = { pr = conversation() }
+    local buf, writes = attached(github)
+    github.pr.threads[1].comments[1].body = "Edited in the browser."
+    local first = row_of(buf, "My first line.")
+    vim.api.nvim_buf_set_lines(buf, first - 1, first, false, { "Edited here." })
+    pr_buffer.save(buf)
+    assert.same({}, writes)
+    assert.matches("a comment of yours changed on GitHub", notified[#notified].msg)
+  end)
+
+  it("refuses to empty a comment", function()
+    local buf, writes = attached({ pr = conversation() })
+    local first = row_of(buf, "My first line.")
+    vim.api.nvim_buf_set_lines(buf, first - 1, first + 1, false, {})
+    pr_buffer.save(buf)
+    assert.same({}, writes)
+    assert.matches("can't be emptied", notified[#notified].msg)
+  end)
+
+  it("replies in a thread on the code from the compose box", function()
+    local buf, writes = attached({ pr = conversation() })
+    pr_buffer.reply(buf, row_of(buf, "Why b?"))
+    vim.api.nvim_buf_set_lines(0, 0, -1, false, { "On it." })
+    vim.cmd("stopinsert")
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false)
+    assert.same({ { how = "reply", id = "T_1", body = "On it." } }, writes)
+  end)
+
+  it("answers a comment on the PR with a new comment addressed to its author", function()
+    local buf, writes = attached({ pr = conversation() })
+    pr_buffer.reply(buf, row_of(buf, "My second line."))
+    assert.same({ "@ross " }, vim.api.nvim_buf_get_lines(0, 0, -1, false))
+    vim.api.nvim_buf_set_lines(0, 0, -1, false, { "@ross Agreed." })
+    vim.cmd("stopinsert")
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false)
+    assert.same({ { how = "new", id = "PR_1", body = "@ross Agreed." } }, writes)
   end)
 end)
 
