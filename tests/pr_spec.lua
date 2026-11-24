@@ -142,3 +142,78 @@ describe("pr.update", function()
     assert.is_true(vim.tbl_contains(cmd, "body=B"))
   end)
 end)
+
+describe("pr.parse_reviewers", function()
+  --- A recorded reply's PR by its case name (tests/fixtures/reviewers.json, names changed).
+  local function recorded(case)
+    local cases = vim.json.decode(table.concat(vim.fn.readfile(here .. "/fixtures/reviewers.json"), "\n"))
+    return cases[case].data.repository.pullRequest
+  end
+
+  --- A PR node from requests ({ login, code owner }) and reviews ({ login, state }), by `author`.
+  local function node(author, requests, reviews)
+    return {
+      author = { login = author },
+      reviewRequests = {
+        nodes = vim.tbl_map(function(r)
+          return { asCodeOwner = r[2], requestedReviewer = { __typename = "User", login = r[1] } }
+        end, requests),
+      },
+      latestReviews = {
+        nodes = vim.tbl_map(function(r)
+          return { state = r[2], author = { login = r[1] }, onBehalfOf = { nodes = {} } }
+        end, reviews),
+      },
+    }
+  end
+
+  --- Reviewers as "name kind state" strings, code owners starred.
+  local function brief(reviewers)
+    return vim.tbl_map(function(r)
+      return ("%s%s %s %s"):format(r.name, r.code_owner and "*" or "", r.kind, r.state)
+    end, reviewers)
+  end
+
+  it("lists requested teams and users pending, code owners marked, then unrequested reviews", function()
+    local reviewers = pr.parse_reviewers(recorded("teams_and_an_unrequested_review"))
+    assert.same({
+      "acme/physics* team pending",
+      "acme/runtime* team pending",
+      "bob user pending",
+      "carol user pending",
+      "dave user approved",
+    }, brief(reviewers))
+    assert.same({ "acme/devs", "acme/orchestrator" }, reviewers[5].on_behalf_of)
+    assert.same({}, reviewers[1].on_behalf_of)
+  end)
+
+  it("lists a team's auto-assigned member as a request of its own", function()
+    assert.same({
+      "acme/platform* team pending",
+      "frank user pending",
+      "claude user commented",
+    }, brief(pr.parse_reviewers(recorded("team_and_its_auto_assigned_member"))))
+  end)
+
+  it("reads each submitted review's state", function()
+    assert.same(
+      { "a user approved", "b user changes_requested", "c user commented" },
+      brief(pr.parse_reviewers(node("me", {}, { { "a", "APPROVED" }, { "b", "CHANGES_REQUESTED" }, { "c", "COMMENTED" } })))
+    )
+  end)
+
+  it("keeps a reviewer requested again pending, once", function()
+    assert.same({ "a user pending" }, brief(pr.parse_reviewers(node("me", { { "a", false } }, { { "a", "APPROVED" } }))))
+  end)
+
+  it("leaves out the author's own reviews, drafts and dismissed reviews", function()
+    assert.same(
+      {},
+      brief(pr.parse_reviewers(node("me", {}, { { "me", "COMMENTED" }, { "a", "PENDING" }, { "b", "DISMISSED" } })))
+    )
+  end)
+
+  it("is part of the parsed PR", function()
+    assert.same({}, pr.parse(fixture("pr_open"), ref).reviewers)
+  end)
+end)

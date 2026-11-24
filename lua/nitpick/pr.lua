@@ -20,6 +20,15 @@ local M = {}
 ---@field state nitpick.CheckState
 ---@field url string?
 
+---@alias nitpick.ReviewState "pending"|"commented"|"approved"|"changes_requested"
+
+---@class nitpick.Reviewer
+---@field name string a login, or a team's org/slug
+---@field kind "user"|"team"
+---@field code_owner boolean requested by CODEOWNERS
+---@field state nitpick.ReviewState
+---@field on_behalf_of string[] the teams a submitted review was for
+
 ---@class nitpick.Pr
 ---@field id string GraphQL node id, the handle mutations take
 ---@field ref nitpick.PrRef
@@ -34,6 +43,7 @@ local M = {}
 ---@field updated_at integer epoch seconds
 ---@field merge nitpick.MergeState? nil once merged or closed
 ---@field review nitpick.ReviewDecision?
+---@field reviewers nitpick.Reviewer[]
 ---@field checks nitpick.Check[]
 
 M.QUERY = [[
@@ -43,6 +53,14 @@ query($owner:String!,$name:String!,$number:Int!){
       id number url title body state isDraft createdAt updatedAt headRefName baseRefName
       author{ __typename login }
       mergeable mergeStateStatus reviewDecision
+      reviewRequests(first:50){ nodes{
+        asCodeOwner
+        requestedReviewer{
+          __typename
+          ... on User{ login } ... on Bot{ login } ... on Mannequin{ login } ... on Team{ combinedSlug }
+        }
+      } }
+      latestReviews(first:50){ nodes{ state author{ login } onBehalfOf(first:10){ nodes{ combinedSlug } } } }
       commits(last:1){ nodes{ commit{ statusCheckRollup{ contexts(first:100){ nodes{
         __typename
         ... on CheckRun{ name status conclusion detailsUrl }
@@ -175,8 +193,60 @@ function M.parse(reply, ref)
     merge = (state == "open" or state == "draft") and (MERGE_STATES[p.mergeStateStatus] or "unknown")
       or nil,
     review = M.REVIEW_DECISIONS[p.reviewDecision],
+    reviewers = M.parse_reviewers(p),
     checks = M.parse_checks(p.commits),
   }
+end
+
+-- Submitted review states; drafts (PENDING) and dismissed reviews aren't shown.
+local REVIEW_STATES = {
+  APPROVED = "approved",
+  CHANGES_REQUESTED = "changes_requested",
+  COMMENTED = "commented",
+}
+
+--- A pullRequest node's reviewers as GitHub's Reviewers panel lists them:
+--- requests first, pending, then reviewers nobody requested. A reviewer
+--- requested again stays pending; the author's own reviews are left out. A
+--- team member that team auto-assign picked is a request of its own, since
+--- neither the request nor its event names the team; only a submitted review
+--- names the teams it was for.
+---@param p table
+---@return nitpick.Reviewer[]
+function M.parse_reviewers(p)
+  local reviewers, listed = {}, {}
+  for _, request in ipairs(p.reviewRequests.nodes) do
+    local who = request.requestedReviewer
+    local name = who and who ~= vim.NIL and (who.combinedSlug or who.login)
+    if name then
+      listed[name] = true
+      reviewers[#reviewers + 1] = {
+        name = name,
+        kind = who.__typename == "Team" and "team" or "user",
+        code_owner = request.asCodeOwner == true,
+        state = "pending",
+        on_behalf_of = {},
+      }
+    end
+  end
+  local author = p.author ~= vim.NIL and p.author and p.author.login
+  for _, review in ipairs(p.latestReviews.nodes) do
+    local login = review.author ~= vim.NIL and review.author and review.author.login
+    local state = REVIEW_STATES[review.state]
+    if login and state and login ~= author and not listed[login] then
+      listed[login] = true
+      reviewers[#reviewers + 1] = {
+        name = login,
+        kind = "user",
+        code_owner = false,
+        state = state,
+        on_behalf_of = vim.tbl_map(function(team)
+          return team.combinedSlug
+        end, review.onBehalfOf and review.onBehalfOf.nodes or {}),
+      }
+    end
+  end
+  return reviewers
 end
 
 --- The checks on the PR's head commit, from the reply's commits(last:1).

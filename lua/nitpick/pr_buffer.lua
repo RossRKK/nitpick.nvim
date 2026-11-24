@@ -1,6 +1,6 @@
 -- A PR as an editable buffer (nitpick://pr/<owner>/<name>/<number>): the
 -- stack it is in as its title block, the PR's own row holding its editable
--- title, then a header of its state, author, merge state and checks, then its
+-- title, then a header of its state, author, reviewers, merge state and checks, then its
 -- editable description. :w (or <C-s>) saves the title and description to GitHub.
 
 local async = require("nitpick.async")
@@ -372,6 +372,14 @@ local REVIEW_TEXT = {
   review_required = { "review required", "DiagnosticWarn" },
 }
 
+-- A review state's glyph, highlight and word, as GitHub's Reviewers panel shows it.
+local REVIEWER_STATES = {
+  pending = { "\u{25cf}", "DiagnosticWarn", "pending" },
+  commented = { "\u{f075}", "Comment", "commented" },
+  approved = { "\u{2713}", "DiagnosticOk", "approved" },
+  changes_requested = { "\u{2717}", "DiagnosticError", "changes requested" },
+}
+
 -- Glyph and highlight per check state, in the order the summary counts them.
 local CHECK_STATES = {
   { "failed", "\u{2717}", "DiagnosticError" },
@@ -447,6 +455,26 @@ function M.layout(pr, stack, now)
     { "@" .. pr.author.login .. (pr.author.is_bot and " (bot)" or ""), "NitpickPrAuthor" },
     { ("  opened %s \u{b7} updated %s"):format(M.ago(now - pr.created_at), M.ago(now - pr.updated_at)), "Comment" },
   })
+  local reviewers_label = label("Reviewers")
+  if #pr.reviewers == 0 then
+    row({ reviewers_label, { "none", "Comment" } })
+  end
+  local name_width = 0
+  for _, r in ipairs(pr.reviewers) do
+    name_width = math.max(name_width, vim.fn.strdisplaywidth(r.name))
+  end
+  for i, r in ipairs(pr.reviewers) do
+    local review = REVIEWER_STATES[r.state]
+    row({
+      i == 1 and reviewers_label or { (" "):rep(#reviewers_label[1]) },
+      { review[1] .. " ", review[2] },
+      { r.name .. (" "):rep(name_width - vim.fn.strdisplaywidth(r.name)) },
+      -- Shield (nf-fa-shield), as GitHub marks a code owner.
+      { r.code_owner and " \u{f132}" or "  ", "NitpickPrCodeOwner" },
+      { "  " .. review[3], review[2] },
+      { #r.on_behalf_of > 0 and "  for " .. table.concat(r.on_behalf_of, ", ") or "", "Comment" },
+    })
+  end
   if pr.merge then
     local merge = MERGE_TEXT[pr.merge]
     row({ label("Merge"), { merge[1], merge[2] } })
@@ -532,6 +560,7 @@ function M.setup(opts)
       NitpickPrBranch = "Identifier",
       NitpickPrAuthor = "Title",
       NitpickPrRule = "Comment",
+      NitpickPrCodeOwner = "Special",
     }) do
       vim.api.nvim_set_hl(0, group, { link = link, default = true })
     end

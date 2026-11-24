@@ -19,6 +19,13 @@
                 },
                 "mergeable": "UNKNOWN",
                 "mergeStateStatus": "UNKNOWN",
+                "reviewDecision": null,
+                "reviewRequests": {
+                    "nodes": []
+                },
+                "latestReviews": {
+                    "nodes": []
+                },
                 "commits": {
                     "nodes": [
                         {

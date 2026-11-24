@@ -46,6 +46,13 @@
                             }
                         }
                     ]
+                },
+                "reviewDecision": null,
+                "reviewRequests": {
+                    "nodes": []
+                },
+                "latestReviews": {
+                    "nodes": []
                 }
             }
         }

@@ -90,7 +90,8 @@ edited in place like the description below the rule; `:w` or `<C-s>` saves
 them, and refuses if GitHub's copy of an edited field changed since the buffer
 loaded. `<CR>` on another row opens that PR (`setup({ on_stack_select })`
 replaces this), `gx` opens it in the browser. Under the stack, the header shows
-the state, author, merge state and checks, each failed or running check on its
+the state, author, reviewers (as GitHub's Reviewers panel lists them, code
+owners shielded), merge state and checks, each failed or running check on its
 own row: `gd` there opens it.
 
 ## Tests

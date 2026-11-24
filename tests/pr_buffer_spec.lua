@@ -26,6 +26,7 @@ local function make_pr(fields)
     created_at = NOW - 14 * DAY,
     updated_at = NOW - 30,
     merge = "clean",
+    reviewers = {},
     checks = {},
   }, fields or {})
 end
@@ -67,6 +68,7 @@ describe("pr_buffer.layout", function()
       "",
       "Status: Open  main \u{2190} feat",
       "Author: @ross  opened 2 weeks ago \u{b7} updated just now",
+      "Reviewers: none",
       "Merge: Clean",
       "Checks: none",
       "Why.",
@@ -74,7 +76,7 @@ describe("pr_buffer.layout", function()
       "How.",
     }, layout.lines)
     assert.equals(1, layout.title_row)
-    assert.equals(8, layout.body_row)
+    assert.equals(9, layout.body_row)
     assert.equals("\u{25c9} #7  ", virt(layout, 1).inline)
   end)
 
@@ -100,10 +102,10 @@ describe("pr_buffer.layout", function()
       },
     })
     local layout = pr_buffer.layout(p, alone(p), NOW)
-    assert.equals("Checks: 1 failed \u{b7} 1 running \u{b7} 1 skipped \u{b7} 1 passed", layout.lines[7])
-    assert.equals("  \u{2717} lint", layout.lines[8])
-    assert.equals("  \u{25cf} slow", layout.lines[9])
-    assert.same({ [8] = "u-lint", [9] = "u-slow" }, layout.check_urls)
+    assert.equals("Checks: 1 failed \u{b7} 1 running \u{b7} 1 skipped \u{b7} 1 passed", layout.lines[8])
+    assert.equals("  \u{2717} lint", layout.lines[9])
+    assert.equals("  \u{25cf} slow", layout.lines[10])
+    assert.same({ [9] = "u-lint", [10] = "u-slow" }, layout.check_urls)
     assert.equals("\u{2717}", virt(layout, 1).right_align:match("%S+$"), "the stack row rolls the checks up")
   end)
 
@@ -113,7 +115,19 @@ describe("pr_buffer.layout", function()
     local layout = pr_buffer.layout(merged, alone(merged), NOW)
     assert.equals("Status: Merged  main \u{2190} feat", layout.lines[4])
     assert.matches("^Author: @mergify %(bot%)", layout.lines[5])
-    assert.equals("Checks: none", layout.lines[6])
+    assert.equals("Checks: none", layout.lines[7])
+  end)
+
+  it("lists the reviewers under one label, names aligned, code owners shielded, a review's teams after it", function()
+    local p = make_pr({
+      reviewers = {
+        { name = "acme/devs", kind = "team", code_owner = true, state = "pending", on_behalf_of = {} },
+        { name = "bob", kind = "user", code_owner = false, state = "approved", on_behalf_of = { "acme/web" } },
+      },
+    })
+    local layout = pr_buffer.layout(p, alone(p), NOW)
+    assert.equals("Reviewers: \u{25cf} acme/devs \u{f132}  pending", layout.lines[6])
+    assert.equals("           \u{2713} bob" .. (" "):rep(10) .. "approved  for acme/web", layout.lines[7])
   end)
 end)
 
@@ -257,7 +271,7 @@ describe("a PR buffer", function()
     end
     local buf = attached({ pr = make_pr({ checks = { { name = "lint", state = "failed", url = "u-lint" } } }) })
     vim.api.nvim_buf_set_lines(buf, 2, 2, false, { "", "" })
-    vim.api.nvim_win_set_cursor(0, { 10, 0 })
+    vim.api.nvim_win_set_cursor(0, { 11, 0 })
     assert.equals("  \u{2717} lint", vim.api.nvim_get_current_line())
     vim.cmd("normal gd")
     assert.equals("u-lint", opened)
