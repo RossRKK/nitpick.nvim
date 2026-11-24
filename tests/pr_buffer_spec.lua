@@ -523,6 +523,38 @@ describe("a PR buffer's conversation", function()
     assert.matches("can't be emptied", notified[#notified].msg)
   end)
 
+  it("spell checks only what you write: the title, the description and your comments", function()
+    local pr = conversation()
+    pr.title = "Add the thingg"
+    pr.body = "Why.\n\nHoww."
+    pr.author = { login = "qwrtpl", is_bot = false }
+    pr.head = "featt"
+    pr.reviewers = { { name = "mkodrycka", state = "pending", code_owner = false, on_behalf_of = { "o/sofites" } } }
+    pr.checks = { { name = "xyzzyq", state = "failed", url = "https://ci/1" } }
+    pr.threads[1].comments[1].body = "My frist line."
+    pr.threads[2].comments[1].body = "Whyy b?"
+    local buf = attached({ pr = pr })
+    vim.wo.spell, vim.bo[buf].spelllang, vim.bo[buf].spellcapcheck = true, "en", ""
+    local wrapscan = vim.o.wrapscan
+    vim.o.wrapscan = false
+    vim.cmd("normal! zR")
+    -- Markdown's spell regions are treesitter's, found only once parsed and drawn.
+    vim.treesitter.get_parser(buf):parse(true)
+    vim.cmd("redraw")
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    local flagged = {}
+    for _ = 1, 20 do
+      local before = vim.api.nvim_win_get_cursor(0)
+      pcall(vim.cmd, "normal! ]S")
+      if vim.deep_equal(before, vim.api.nvim_win_get_cursor(0)) then
+        break
+      end
+      flagged[#flagged + 1] = vim.fn.expand("<cword>")
+    end
+    vim.o.wrapscan = wrapscan
+    assert.same({ "thingg", "Howw", "frist" }, flagged)
+  end)
+
   --- The 1-based row opening the thread on `location`, whatever time the buffer says it was written.
   local function opener_of(buf, location)
     for i, l in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do

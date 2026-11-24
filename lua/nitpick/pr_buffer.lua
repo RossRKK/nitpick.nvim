@@ -12,7 +12,7 @@ local timeline = require("nitpick.timeline")
 
 local M = {}
 
-local write, spanning, fold_threads, remember_folds, topic, quote, unquote -- defined below their callers
+local write, spanning, fold_threads, remember_folds, unspell_generated, topic, quote, unquote -- defined below their callers
 
 ---@class nitpick.PrClient
 ---@field fetch fun(ref: nitpick.PrRef): nitpick.Pr?, string?
@@ -409,9 +409,11 @@ function M.render(buf, pr, stack, now)
   states[buf].comments = spans(ns_comments, layout.comments)
   -- A comment's body is the lines between the row above it (its author's, or its code's) and the row after it, as the title's is.
   states[buf].editable = {}
+  local prose = { { layout.title_row, layout.title_row }, { layout.body_row, layout.conversation_row - 1 } }
   for _, span in ipairs(layout.comments) do
     local c = span[3]
     if c.can_edit and c.kind then
+      prose[#prose + 1] = { span[4] + 1, span[2] }
       table.insert(states[buf].editable, {
         comment = c,
         above = vim.api.nvim_buf_set_extmark(buf, ns_bounds, span[4] - 1, 0, {}),
@@ -420,6 +422,7 @@ function M.render(buf, pr, stack, now)
       })
     end
   end
+  unspell_generated(buf, layout.lines, prose)
   local check_urls, stack_rows = {}, {}
   for row, url in pairs(layout.check_urls) do
     check_urls[vim.api.nvim_buf_set_extmark(buf, ns_checks, row - 1, 0, {})] = url
@@ -434,6 +437,27 @@ function M.render(buf, pr, stack, now)
     fold_threads(buf, win)
   end
   vim.bo[buf].modified = false
+end
+
+--- Turn spell checking off in `buf` but for the `prose` rows (1-based, first and last), those you write: GitHub's names and labels are no words to check.
+---@param buf integer
+---@param lines string[]
+---@param prose { [1]: integer, [2]: integer }[]
+function unspell_generated(buf, lines, prose)
+  local function unspell(first, last)
+    if first <= last then
+      vim.api.nvim_buf_set_extmark(buf, ns, first - 1, 0, { end_row = last - 1, end_col = #lines[last], spell = false })
+    end
+  end
+  table.sort(prose, function(a, b)
+    return a[1] < b[1]
+  end)
+  local from = 1
+  for _, span in ipairs(prose) do
+    unspell(from, span[1] - 1)
+    from = math.max(from, span[2] + 1)
+  end
+  unspell(from, #lines)
 end
 
 --- A thread's name across renders: its own id, else its first comment's.
