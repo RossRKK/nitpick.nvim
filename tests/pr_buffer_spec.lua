@@ -175,46 +175,35 @@ describe("pr_buffer.layout", function()
     assert.equals("Checks: none", layout.lines[7])
   end)
 
-  it("lays the conversation out under the description, the code a thread is on above it", function()
+  it("lays each thread out as a quote, its opener naming the code it is on, then that code, its replies quoted within it", function()
     local p = conversation()
     local layout = pr_buffer.layout(p, alone(p), NOW, {})
     local from = layout.conversation_row
     assert.same({
       "Conversation \u{b7} 3 threads \u{b7} 1 by bots hidden (mergify)",
       "",
-      "@ross  1 minute ago",
-      "My first line.",
-      "My second line.",
+      "> @ross  1 minute ago",
+      "> My first line.",
+      "> My second line.",
       "",
       "---",
       "",
-      "lua/x.lua:12",
-      "\u{2502}  local a = 1",
-      "\u{2502} +local b = 2",
-      "@bob  1 hour ago",
-      "Why b?",
-      "@ross  30 minutes ago",
-      "Because.",
+      "> @bob  1 hour ago on lua/x.lua:12",
+      "> \u{2502}  local a = 1",
+      "> \u{2502} +local b = 2",
+      "> Why b?",
+      "> > @ross  30 minutes ago",
+      "> > Because.",
       "",
       "---",
       "",
-      "lua/y.lua:3  resolved",
-      "\u{2502} -gone",
-      "@bob  2 hours ago",
-      "Said bob.",
+      "> @bob  2 hours ago on lua/y.lua:3  resolved",
+      "> \u{2502} -gone",
+      "> Said bob.",
       "",
     }, vim.list_slice(layout.lines, from))
     assert.same({ from + 2, from + 4 }, { layout.comments[1][1], layout.comments[1][2] })
-    assert.same({ from + 8, from + 14 }, { layout.threads[2][1], layout.threads[2][2] })
-  end)
-
-  it("indents a thread's replies, its first comment not", function()
-    local p = conversation()
-    local layout = pr_buffer.layout(p, alone(p), NOW, {})
-    local from = layout.conversation_row
-    assert.is_nil(virt(layout, from + 11).inline, "the comment that opened the thread")
-    assert.equals("    ", virt(layout, from + 13).inline, "the reply's author row")
-    assert.equals("    ", virt(layout, from + 14).inline, "the reply's body")
+    assert.same({ from + 8, from + 13 }, { layout.threads[2][1], layout.threads[2][2] })
   end)
 
   it("shows a bot's comments when asked to", function()
@@ -471,23 +460,44 @@ describe("a PR buffer's conversation", function()
 
   it("saves an edit to your comment in place, the line replaced and another added", function()
     local buf, writes = attached({ pr = conversation() })
-    local second = row_of(buf, "My second line.")
-    vim.api.nvim_buf_set_lines(buf, second - 1, second, false, { "My better line.", "And one more." })
+    local second = row_of(buf, "> My second line.")
+    vim.api.nvim_buf_set_lines(buf, second - 1, second, false, { "> My better line.", "And one more, typed unquoted." })
     pr_buffer.save(buf)
-    assert.same({ { how = "pr", id = "C_ross60", body = "My first line.\nMy better line.\nAnd one more." } }, writes)
+    assert.same({ { how = "pr", id = "C_ross60", body = "My first line.\nMy better line.\nAnd one more, typed unquoted." } }, writes)
   end)
 
   it("saves your reply in a thread on the code as a review comment", function()
     local buf, writes = attached({ pr = conversation() })
-    local because = row_of(buf, "Because.")
-    vim.api.nvim_buf_set_lines(buf, because - 1, because, false, { "Because a needs company." })
+    local because = row_of(buf, "> > Because.")
+    vim.api.nvim_buf_set_lines(buf, because - 1, because, false, { "> > Because a needs company." })
     pr_buffer.save(buf)
     assert.same({ { how = "review_comment", id = "C_ross1800", body = "Because a needs company." } }, writes)
   end)
 
+  it("saves your comment opening a thread on the code without that code", function()
+    local p = conversation()
+    p.threads[3].comments[1] = comment("ross", 7200, { kind = "review_comment", can_edit = true, body = "Gone?" })
+    local buf, writes = attached({ pr = p })
+    local gone = row_of(buf, "> Gone?")
+    vim.api.nvim_buf_set_lines(buf, gone - 1, gone, false, { "> Gone, good." })
+    pr_buffer.save(buf)
+    assert.same({ { how = "review_comment", id = "C_ross7200", body = "Gone, good." } }, writes)
+  end)
+
+  it("saves a reply holding its own quote and an empty line, only the thread's quoting taken off", function()
+    local p = conversation()
+    p.threads[2].comments[2].body = "> Why b?\n\nBecause."
+    local buf, writes = attached({ pr = p })
+    assert.equals("> >", vim.api.nvim_buf_get_lines(buf, row_of(buf, "> > > Why b?"), row_of(buf, "> > Because."), false)[1])
+    local because = row_of(buf, "> > Because.")
+    vim.api.nvim_buf_set_lines(buf, because - 1, because, false, { "> > Because, really." })
+    pr_buffer.save(buf)
+    assert.same({ { how = "review_comment", id = "C_ross1800", body = "> Why b?\n\nBecause, really." } }, writes)
+  end)
+
   it("leaves someone else's comment alone when its lines are edited", function()
     local buf, writes = attached({ pr = conversation() })
-    local why = row_of(buf, "Why b?")
+    local why = row_of(buf, "> Why b?")
     vim.api.nvim_buf_set_lines(buf, why - 1, why, false, { "Rewritten." })
     pr_buffer.save(buf)
     assert.same({}, writes)
@@ -497,8 +507,8 @@ describe("a PR buffer's conversation", function()
     local github = { pr = conversation() }
     local buf, writes = attached(github)
     github.pr.threads[1].comments[1].body = "Edited in the browser."
-    local first = row_of(buf, "My first line.")
-    vim.api.nvim_buf_set_lines(buf, first - 1, first, false, { "Edited here." })
+    local first = row_of(buf, "> My first line.")
+    vim.api.nvim_buf_set_lines(buf, first - 1, first, false, { "> Edited here." })
     pr_buffer.save(buf)
     assert.same({}, writes)
     assert.matches("a comment of yours changed on GitHub", notified[#notified].msg)
@@ -506,12 +516,22 @@ describe("a PR buffer's conversation", function()
 
   it("refuses to empty a comment", function()
     local buf, writes = attached({ pr = conversation() })
-    local first = row_of(buf, "My first line.")
+    local first = row_of(buf, "> My first line.")
     vim.api.nvim_buf_set_lines(buf, first - 1, first + 1, false, {})
     pr_buffer.save(buf)
     assert.same({}, writes)
     assert.matches("can't be emptied", notified[#notified].msg)
   end)
+
+  --- The 1-based row opening the thread on `location`, whatever time the buffer says it was written.
+  local function opener_of(buf, location)
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+      if l:find(" on " .. location, 1, true) then
+        return i
+      end
+    end
+    error("no thread on " .. location)
+  end
 
   --- The first and last row of the closed fold at `row`, or nil when it's open.
   local function closed_at(row)
@@ -521,34 +541,34 @@ describe("a PR buffer's conversation", function()
 
   it("folds each thread, a resolved one closed and the rest open", function()
     local buf = attached({ pr = conversation() })
-    local resolved = row_of(buf, "lua/y.lua:3  resolved")
-    assert.same({ resolved, resolved + 3 }, closed_at(resolved))
-    local open = row_of(buf, "lua/x.lua:12")
+    local resolved = opener_of(buf, "lua/y.lua:3")
+    assert.same({ resolved, resolved + 2 }, closed_at(resolved))
+    local open = opener_of(buf, "lua/x.lua:12")
     assert.is_nil(closed_at(open))
     vim.cmd(open .. "foldclose")
-    assert.same({ open, row_of(buf, "Because.") }, closed_at(open), "the fold covers the thread, its code and every comment")
+    assert.same({ open, row_of(buf, "> > Because.") }, closed_at(open), "the fold covers the thread, its code and every comment")
   end)
 
   it("keeps the folds as they were left across a reload", function()
     local buf = attached({ pr = conversation() })
-    vim.cmd(row_of(buf, "lua/y.lua:3  resolved") .. "foldopen")
-    vim.cmd(row_of(buf, "lua/x.lua:12") .. "foldclose")
+    vim.cmd(opener_of(buf, "lua/y.lua:3") .. "foldopen")
+    vim.cmd(opener_of(buf, "lua/x.lua:12") .. "foldclose")
     pr_buffer.refresh(buf)
-    assert.is_nil(closed_at(row_of(buf, "lua/y.lua:3  resolved")))
-    assert.is_not_nil(closed_at(row_of(buf, "lua/x.lua:12")))
+    assert.is_nil(closed_at(opener_of(buf, "lua/y.lua:3")))
+    assert.is_not_nil(closed_at(opener_of(buf, "lua/x.lua:12")))
   end)
 
   it("folds the threads afresh in another window showing the buffer", function()
     local buf = attached({ pr = conversation() })
     vim.cmd("split")
     vim.api.nvim_win_set_buf(0, buf)
-    assert.is_not_nil(closed_at(row_of(buf, "lua/y.lua:3  resolved")))
+    assert.is_not_nil(closed_at(opener_of(buf, "lua/y.lua:3")))
     vim.cmd("close")
   end)
 
   it("replies in a thread on the code from the compose box", function()
     local buf, writes = attached({ pr = conversation() })
-    pr_buffer.reply(buf, row_of(buf, "Why b?"))
+    pr_buffer.reply(buf, row_of(buf, "> Why b?"))
     vim.api.nvim_buf_set_lines(0, 0, -1, false, { "On it." })
     vim.cmd("stopinsert")
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false)
@@ -557,7 +577,7 @@ describe("a PR buffer's conversation", function()
 
   it("answers a comment on the PR with a new comment addressed to its author", function()
     local buf, writes = attached({ pr = conversation() })
-    pr_buffer.reply(buf, row_of(buf, "My second line."))
+    pr_buffer.reply(buf, row_of(buf, "> My second line."))
     assert.same({ "@ross " }, vim.api.nvim_buf_get_lines(0, 0, -1, false))
     vim.api.nvim_buf_set_lines(0, 0, -1, false, { "@ross Agreed." })
     vim.cmd("stopinsert")

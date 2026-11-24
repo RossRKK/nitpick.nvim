@@ -12,7 +12,7 @@ local timeline = require("nitpick.timeline")
 
 local M = {}
 
-local write, spanning, fold_threads, remember_folds -- defined below their callers
+local write, spanning, fold_threads, remember_folds, topic, quote, unquote -- defined below their callers
 
 ---@class nitpick.PrClient
 ---@field fetch fun(ref: nitpick.PrRef): nitpick.Pr?, string?
@@ -28,7 +28,7 @@ local write, spanning, fold_threads, remember_folds -- defined below their calle
 ---@field stack_rows table<integer, nitpick.StackPr> stack row's extmark id -> its PR
 ---@field threads table<integer, nitpick.Thread> a thread's extmark id -> it
 ---@field comments table<integer, nitpick.Comment> a comment's extmark id -> it
----@field editable { comment: nitpick.Comment, above: integer, below: integer }[] your comments, by the marks on the rows bounding their bodies
+---@field editable { comment: nitpick.Comment, above: integer, below: integer, depth: integer }[] your comments, by the marks on the rows bounding their bodies, and how deep those are quoted
 ---@field folded table<string, boolean> by thread, whether its fold was closed when the buffer last redrew
 
 ---@type table<integer, nitpick.PrBufferState>
@@ -407,15 +407,16 @@ function M.render(buf, pr, stack, now)
   end
   states[buf].threads = spans(ns_threads, layout.threads)
   states[buf].comments = spans(ns_comments, layout.comments)
-  -- A comment's body is the lines between its author row and the row after it, as the title's is.
+  -- A comment's body is the lines between the row above it (its author's, or its code's) and the row after it, as the title's is.
   states[buf].editable = {}
   for _, span in ipairs(layout.comments) do
     local c = span[3]
     if c.can_edit and c.kind then
       table.insert(states[buf].editable, {
         comment = c,
-        above = vim.api.nvim_buf_set_extmark(buf, ns_bounds, span[1] - 1, 0, {}),
+        above = vim.api.nvim_buf_set_extmark(buf, ns_bounds, span[4] - 1, 0, {}),
         below = vim.api.nvim_buf_set_extmark(buf, ns_bounds, span[2], 0, {}),
+        depth = span[5],
       })
     end
   end
@@ -490,7 +491,7 @@ end
 
 --- The title and description as `buf` holds them now: every line between the
 --- stack rows around the PR's own, every line between the header and the conversation,
---- and each of your comments' lines between its author row and the row after.
+--- and each of your comments' lines between the row above its body and the row after, unquoted.
 ---@param buf integer
 ---@return { title: string, body: string, comments: { comment: nitpick.Comment, body: string }[] }
 function M.edits(buf)
@@ -505,7 +506,10 @@ function M.edits(buf)
     comments = vim.tbl_map(function(e)
       local first = vim.api.nvim_buf_get_extmark_by_id(buf, ns_bounds, e.above, {})[1] + 1
       local after = vim.api.nvim_buf_get_extmark_by_id(buf, ns_bounds, e.below, {})[1]
-      return { comment = e.comment, body = table.concat(vim.api.nvim_buf_get_lines(buf, first, after, false), "\n") }
+      local body = vim.tbl_map(function(l)
+        return unquote(e.depth, l)
+      end, vim.api.nvim_buf_get_lines(buf, first, after, false))
+      return { comment = e.comment, body = table.concat(body, "\n") }
     end, states[buf].editable),
   }
 end
@@ -591,7 +595,7 @@ end
 ---@field stack_rows table<integer, nitpick.StackPr> row -> the stack's PR drawn there
 ---@field conversation_row integer
 ---@field threads { [1]: integer, [2]: integer, [3]: nitpick.Thread }[] first and last row of each thread drawn
----@field comments { [1]: integer, [2]: integer, [3]: nitpick.Comment }[] first and last row of each comment drawn
+---@field comments { [1]: integer, [2]: integer, [3]: nitpick.Comment, [4]: integer, [5]: integer }[] first and last row of each comment drawn, the row its body follows, and how deep its body is quoted
 
 local STATE_TEXT = {
   open = { "Open", "NitpickPrOpen" },
@@ -638,9 +642,6 @@ end
 
 -- A diff line's highlight by its first character.
 local DIFF_HL = { ["+"] = "DiffAdd", ["-"] = "DiffDelete" }
-
--- A reply's indent, drawn so the buffer's text stays the comment's own.
-local REPLY_INDENT = { { "    " } }
 
 -- Checks listed one per row: those needing attention. The rest are only counted.
 local LISTED = { failed = true, running = true }
@@ -772,40 +773,30 @@ function M.layout(pr, stack, now, show_bots)
     -- A thematic break needs the blank row above it, or markdown reads the line before as a heading.
     vim.list_extend(lines, i > 1 and { "", "---", "" } or { "" })
     local start = #lines + 1
-    if t.kind == "inline" then
-      local tags = {}
-      if t.outdated then
-        tags[#tags + 1] = "outdated"
-      end
-      if t.resolved then
-        tags[#tags + 1] = "resolved"
-      end
-      row({
-        { t.path .. (t.line and (":" .. t.line) or ""), "NitpickPrPath" },
-        { #tags > 0 and ("  " .. table.concat(tags, " \u{b7} ")) or "", "Comment" },
-      })
-    end
-    for _, h in ipairs(t.hunk or {}) do
-      -- Behind a bar, so markdown never reads a removed line as a list item.
-      row({ { "\u{2502} ", "Comment" }, { h, DIFF_HL[h:sub(1, 1)] } })
-    end
     for j, c in ipairs(t.comments) do
       local comment_start = #lines + 1
-      local verdict = t.kind == "review" and REVIEWER_STATES[t.review_state]
-      row({
+      -- A thread is a quote and a reply one within it: a renderer draws their bars, and a wrapped line hangs inside them.
+      local depth = j == 1 and 1 or 2
+      local author = {
+        { quote(depth, "") .. " " },
         { "@" .. c.author.login .. (c.author.is_bot and " (bot)" or ""), "NitpickPrAuthor" },
         { "  " .. M.ago(now - c.created_at), "Comment" },
-        verdict and { "  " .. verdict[3], verdict[2] } or { "" },
-      })
-      if c.body ~= "" then
-        vim.list_extend(lines, vim.split(c.body, "\n", { plain = true }))
-      end
-      comment_spans[#comment_spans + 1] = { comment_start, #lines, c }
-      if j > 1 then
-        for r = comment_start, #lines do
-          decorations[#decorations + 1] = { r, { virt_text = REPLY_INDENT, virt_text_pos = "inline" } }
+      }
+      -- The thread's opening row says who said what on which code, the code under it.
+      row(vim.list_extend(author, j == 1 and topic(t) or {}))
+      if j == 1 then
+        for _, h in ipairs(t.hunk or {}) do
+          -- Behind a bar, so markdown never reads a removed line as a list item.
+          row({ { quote(depth, "") .. " " }, { "\u{2502} ", "Comment" }, { h, DIFF_HL[h:sub(1, 1)] } })
         end
       end
+      local body_above = #lines
+      if c.body ~= "" then
+        for _, l in ipairs(vim.split(c.body, "\n", { plain = true })) do
+          lines[#lines + 1] = quote(depth, l)
+        end
+      end
+      comment_spans[#comment_spans + 1] = { comment_start, #lines, c, body_above, depth }
     end
     thread_spans[#thread_spans + 1] = { start, #lines, t }
   end
@@ -823,6 +814,51 @@ function M.layout(pr, stack, now, show_bots)
     threads = thread_spans,
     comments = comment_spans,
   }
+end
+
+--- What a thread's opening row says it is about: a review's verdict, or the code a thread on the code is on.
+---@param t nitpick.Thread
+---@return { [1]: string, [2]: string? }[]
+function topic(t)
+  if t.kind == "review" then
+    local verdict = REVIEWER_STATES[t.review_state]
+    return { { "  " .. verdict[3], verdict[2] } }
+  end
+  if t.kind ~= "inline" then
+    return {}
+  end
+  local tags = {}
+  if t.outdated then
+    tags[#tags + 1] = "outdated"
+  end
+  if t.resolved then
+    tags[#tags + 1] = "resolved"
+  end
+  return {
+    { " on ", "Comment" },
+    { t.path .. (t.line and (":" .. t.line) or ""), "NitpickPrPath" },
+    { #tags > 0 and ("  " .. table.concat(tags, " \u{b7} ")) or "", "Comment" },
+  }
+end
+
+--- `text` quoted `depth` deep, as markdown writes a quote: no space after the last marker of an empty line.
+---@param depth integer
+---@param text string
+---@return string
+function quote(depth, text)
+  local quoted = ("> "):rep(depth) .. text
+  return text == "" and quoted:sub(1, -2) or quoted
+end
+
+--- `line` with `depth` quote markers taken off its front, as many as it has.
+---@param depth integer
+---@param line string
+---@return string
+function unquote(depth, line)
+  for _ = 1, depth do
+    line = line:gsub("^> ?", "", 1)
+  end
+  return line
 end
 
 -- Spans for M.ago, largest first: seconds in one, and its name.
