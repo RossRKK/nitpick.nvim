@@ -202,3 +202,41 @@ describe("a PR buffer", function()
     assert.equals("u-lint", opened)
   end)
 end)
+
+describe("pr_buffer.buffer and refresh", function()
+  local pr = require("nitpick.pr")
+  local fetch, fetches
+  before_each(function()
+    fetch, fetches = pr.fetch, 0
+    pr.fetch = function(ref)
+      fetches = fetches + 1
+      return vim.tbl_extend("force", make_pr(), { ref = ref })
+    end
+  end)
+  after_each(function()
+    pr.fetch = fetch
+  end)
+
+  it("makes one unlisted buffer per PR, loaded once", function()
+    local ref = { owner = "o", name = "r", number = 41 }
+    local buf, fresh = pr_buffer.buffer(ref)
+    assert.is_true(fresh)
+    assert.is_false(vim.bo[buf].buflisted)
+    assert.equals("nitpick://pr/o/r/41", vim.api.nvim_buf_get_name(buf))
+    assert.equals("Add the thing", vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1])
+    local again, fresh_again = pr_buffer.buffer(ref)
+    assert.equals(buf, again)
+    assert.is_false(fresh_again)
+    assert.equals(1, fetches)
+  end)
+
+  it("refreshes from GitHub, but not over unsaved edits", function()
+    local buf = pr_buffer.buffer({ owner = "o", name = "r", number = 42 })
+    pr_buffer.refresh(buf)
+    assert.equals(2, fetches)
+    vim.api.nvim_buf_set_lines(buf, 0, 1, false, { "My title" })
+    pr_buffer.refresh(buf)
+    assert.equals(2, fetches)
+    assert.equals("My title", vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1])
+  end)
+end)

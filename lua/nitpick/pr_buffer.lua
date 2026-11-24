@@ -55,6 +55,30 @@ function M.open(number)
   end)
 end
 
+--- The buffer showing `ref`, made unlisted and loaded on first ask, for a caller placing it in a window of its own.
+---@param ref nitpick.PrRef
+---@return integer buf, boolean fresh made just now, so already loading
+function M.buffer(ref)
+  local name = M.uri(ref)
+  for buf, _ in pairs(states) do
+    if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == name then
+      return buf, false
+    end
+  end
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_name(buf, name)
+  M.attach(buf, ref, require("nitpick.pr"))
+  return buf, true
+end
+
+--- Reload `buf`'s PR from GitHub, unless it holds edits not yet saved.
+---@param buf integer
+function M.refresh(buf)
+  if states[buf] and not vim.bo[buf].modified then
+    M.load(buf)
+  end
+end
+
 --- Make `buf` the PR buffer of `ref`, loaded from and saved through `client`.
 ---@param buf integer
 ---@param ref nitpick.PrRef
