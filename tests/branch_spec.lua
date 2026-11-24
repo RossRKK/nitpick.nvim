@@ -2,7 +2,7 @@
 -- HEAD is detached, so the nearest bookmark at or below @ is the answer.
 
 local assert = require("luassert")
-local nitpick = require("nitpick")
+local checkout = require("nitpick.checkout")
 
 --- Run `fn` inside a coroutine and pump the event loop until it returns.
 local function run(fn)
@@ -22,11 +22,11 @@ end
 
 describe("first_bookmark", function()
   it("returns the first non-empty line", function()
-    assert.equals("feat/x", nitpick.first_bookmark("\n feat/x \nmain\n"))
+    assert.equals("feat/x", checkout.first_bookmark("\n feat/x \nmain\n"))
   end)
   it("is empty for empty output", function()
-    assert.equals("", nitpick.first_bookmark(""))
-    assert.equals("", nitpick.first_bookmark(nil))
+    assert.equals("", checkout.first_bookmark(""))
+    assert.equals("", checkout.first_bookmark(nil))
   end)
 end)
 
@@ -44,7 +44,7 @@ describe("current_branch", function()
 
   it("uses the checked-out git branch in a plain git repo", function()
     sh({ "git", "checkout", "-q", "-b", "feat/git" }, root)
-    assert.equals("feat/git", run(function() return nitpick.current_branch(root) end))
+    assert.equals("feat/git", run(function() return checkout.current_branch(root) end))
   end)
 
   it("uses the bookmark below an empty @ in a colocated jj repo", function()
@@ -56,12 +56,12 @@ describe("current_branch", function()
     jj({ "git", "init", "--colocate" })
     jj({ "bookmark", "create", "feat/jj", "-r", "@-" })
     -- HEAD is detached now; the working copy @ is empty and has no bookmark.
-    assert.equals("feat/jj", run(function() return nitpick.current_branch(root) end))
+    assert.equals("feat/jj", run(function() return checkout.current_branch(root) end))
   end)
 
   it("is empty when nothing names the checkout", function()
     sh({ "git", "checkout", "-q", "--detach" }, root)
-    assert.equals("", run(function() return nitpick.current_branch(root) end))
+    assert.equals("", run(function() return checkout.current_branch(root) end))
   end)
 end)
 
@@ -91,8 +91,8 @@ describe("repo_root", function()
     vim.fn.mkdir(ws .. "/src", "p")
     vim.fn.writefile({ "" }, ws .. "/src/a.lua")
 
-    assert.equals(vim.fs.normalize(ws), nitpick.repo_root(ws .. "/src/a.lua"))
-    assert.equals(vim.fs.normalize(root), nitpick.repo_root(root .. "/README"))
+    assert.equals(vim.fs.normalize(ws), checkout.repo_root(ws .. "/src/a.lua"))
+    assert.equals(vim.fs.normalize(root), checkout.repo_root(root .. "/README"))
   end)
 
   it("resolves the branch of the secondary workspace, not the main one", function()
@@ -103,7 +103,7 @@ describe("repo_root", function()
     jj(root, { "workspace", "add", ws })
     jj(ws, { "bookmark", "create", "feat/ws", "-r", "@-" })
 
-    assert.equals("feat/ws", run(function() return nitpick.current_branch(nitpick.repo_root(ws)) end))
+    assert.equals("feat/ws", run(function() return checkout.current_branch(checkout.repo_root(ws)) end))
   end)
 end)
 
@@ -131,13 +131,13 @@ describe("head_commit", function()
   end)
 
   it("is HEAD in a plain git repo", function()
-    assert.equals(git(root, { "rev-parse", "HEAD" }), run(function() return nitpick.head_commit(root) end))
+    assert.equals(git(root, { "rev-parse", "HEAD" }), run(function() return checkout.head_commit(root) end))
   end)
 
   it("is the parent of an empty @ in a jj repo", function()
     jj(root, { "git", "init", "--colocate" })
     local parent = jj(root, { "log", "--no-graph", "-r", "@-", "-T", "commit_id" })
-    assert.equals(parent, run(function() return nitpick.head_commit(root) end))
+    assert.equals(parent, run(function() return checkout.head_commit(root) end))
   end)
 
   it("is @ itself when @ has changes", function()
@@ -145,7 +145,7 @@ describe("head_commit", function()
     vim.fn.writefile({ "x" }, root .. "/a.txt")
     jj(root, { "status" }) -- snapshot the working copy
     local at = jj(root, { "log", "--no-graph", "-r", "@", "-T", "commit_id" })
-    assert.equals(at, run(function() return nitpick.head_commit(root) end))
+    assert.equals(at, run(function() return checkout.head_commit(root) end))
   end)
 
   -- The motivating case: a secondary workspace has .jj but no .git, so
@@ -156,6 +156,6 @@ describe("head_commit", function()
     vim.fn.mkdir(root .. "/.worktrees", "p")
     jj(root, { "workspace", "add", ws })
     local parent = jj(ws, { "log", "--no-graph", "-r", "@-", "-T", "commit_id" })
-    assert.equals(parent, run(function() return nitpick.head_commit(nitpick.repo_root(ws)) end))
+    assert.equals(parent, run(function() return checkout.head_commit(checkout.repo_root(ws)) end))
   end)
 end)

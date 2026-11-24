@@ -45,6 +45,19 @@
 
 local M = {}
 
+local async = require("nitpick.async")
+local branch_pr = require("nitpick.branch_pr")
+local checkout = require("nitpick.checkout")
+local compose = require("nitpick.compose")
+local github = require("nitpick.github")
+
+local sh, run, pick = async.sh, async.run, async.pick
+local gh_json, gh_error = github.json, github.error_text
+local resolve_pr, resolve_viewer = branch_pr.resolve, github.viewer
+local current_root, buf_root, cwd_root = checkout.current_root, checkout.buf_root, checkout.cwd_root
+local under, rel_of = checkout.under, checkout.rel_of
+local open_input, set_compose_title = compose.open_input, compose.set_title
+
 -- User configuration, populated by M.setup(). See setup() for accepted keys.
 M.opts = {}
 
@@ -60,14 +73,6 @@ M.by_path = {}
 -- { line, side, start_line?, body }). Each repo's set loads from disk on first
 -- touch (see ensure_drafts).
 M.drafts = {}
--- Remembers a manual PR choice for a branch so we don't re-prompt:
--- {root, branch, number}.
-M.pr_choice = nil
--- The authenticated GitHub login, cached; used to find your own comments to edit.
-M.viewer = nil
--- login -> resolved display name, cached in-memory. "" means "resolved, but no
--- display name set" (fall back to @login); nil means "not looked up yet".
-M.names = {}
 -- Repos whose inline comments are currently drawn (driven by review mode):
 -- normalized root -> true.
 M.shown_roots = {}
@@ -163,183 +168,6 @@ function M.remap_line(hunks, old_line)
     end
   end
   return old_line + delta, true
-end
-
---- Run a command async, yielding until it exits. Returns the vim.system result
---- object ({ code, stdout, stderr }). MUST run inside a coroutine. `stdin`, when
---- given, is fed to the process's stdin (used to POST a review payload as JSON).
----@param cmd string[]
----@param cwd string?
----@param stdin string?
-local function sh(cmd, cwd, stdin)
-  local co = assert(coroutine.running(), "nitpick: must run inside a coroutine")
-  vim.system(cmd, { text = true, cwd = cwd, stdin = stdin }, function(obj)
-    vim.schedule(function()
-      coroutine.resume(co, obj)
-    end)
-  end)
-  return coroutine.yield()
-end
-
---- Run gh and JSON-decode stdout. Returns (value, nil) or (nil, errmsg).
----@param args string[]
----@param cwd string?
-local function gh_json(args, cwd)
-  local obj = sh(vim.list_extend({ "gh" }, args), cwd)
-  if obj.code ~= 0 then
-    return nil, (obj.stderr ~= "" and obj.stderr or "gh exited " .. obj.code)
-  end
-  local ok, decoded = pcall(vim.json.decode, obj.stdout)
-  if not ok then
-    return nil, "could not parse gh JSON"
-  end
-  return decoded
-end
-
---- One line for a GitHub API error body. The `message` alone is useless for a
---- 422 ("Unprocessable Entity"); the reason lives in `errors`, each either a
---- string or an object with its own message/field/code. Those are appended
---- after a colon, joined by "; ".
----@param decoded { message: string, errors: any[]? }
----@return string
-function M.api_error_text(decoded)
-  local parts = {}
-  for _, e in ipairs(type(decoded.errors) == "table" and decoded.errors or {}) do
-    if type(e) == "string" then
-      parts[#parts + 1] = e
-    elseif type(e) == "table" then
-      local text = e.message or e.code or vim.inspect(e)
-      if e.field then
-        text = e.field .. ": " .. text
-      end
-      parts[#parts + 1] = text
-    end
-  end
-  if #parts == 0 then
-    return decoded.message
-  end
-  return decoded.message .. ": " .. table.concat(parts, "; ")
-end
-
---- A short, single-line summary of a failed gh call, safe to notify without
---- tripping the "Press ENTER to continue" prompt. Prefers the API error's
---- "message" field when the body is JSON; otherwise collapses stderr/stdout to
---- one line and truncates.
----@param obj table vim.system result ({ code, stdout, stderr })
----@return string
-local function gh_error(obj)
-  for _, s in ipairs({ obj.stderr, obj.stdout }) do
-    if s and s ~= "" then
-      local ok, decoded = pcall(vim.json.decode, s)
-      if ok and type(decoded) == "table" and type(decoded.message) == "string" then
-        return M.api_error_text(decoded)
-      end
-    end
-  end
-  local msg = (obj.stderr and obj.stderr ~= "" and obj.stderr) or obj.stdout or ""
-  msg = vim.trim(msg:gsub("%s+", " "))
-  if msg == "" then
-    msg = "gh error"
-  end
-  return (#msg > 200) and (msg:sub(1, 200) .. "…") or msg
-end
-
---- Drive an async body on a coroutine, surfacing errors as a notification.
----@param fn fun()
-local function run(fn)
-  coroutine.wrap(function()
-    local ok, err = pcall(fn)
-    if not ok then
-      vim.notify("nitpick: " .. tostring(err), vim.log.levels.ERROR)
-    end
-  end)()
-end
-
---- vim.ui.select as a coroutine call. Returns the chosen 1-based index, or nil.
---- Handles both the async pickers (snacks: callback fires later, so
---- we yield and resume) and Neovim's builtin select (callback fires *before*
---- vim.ui.select returns — resuming a still-running coroutine would error, so we
---- just hand back the answer directly).
----@param items string[]
----@param opts table
-local function pick(items, opts)
-  local co = coroutine.running()
-  local answered, answer = false, nil
-  vim.ui.select(items, opts, function(_, idx)
-    answered, answer = true, idx
-    if coroutine.status(co) == "suspended" then
-      coroutine.resume(co, idx)
-    end
-  end)
-  if answered then
-    return answer
-  end
-  return coroutine.yield()
-end
-
---- Markers that make a directory a repo root. `.jj` comes first in spirit, not
---- in precedence: vim.fs.root takes the nearest directory holding any marker.
---- A secondary jj workspace has a `.jj` but no `.git`; matching only `.git`
---- would walk up to the main workspace and read its branch instead.
-M.root_markers = { ".jj", ".git" }
-
---- Normalized repo toplevel containing `path` (a path or buffer number), or nil.
----@param path string|integer
----@return string?
-function M.repo_root(path)
-  local root = vim.fs.root(path, M.root_markers)
-  return root and vim.fs.normalize(root) or nil
-end
-
---- Normalized repo toplevel for the current buffer. nil outside a repo.
----@return string?
-local function current_root()
-  return M.repo_root(0)
-end
-
---- Normalized repo toplevel containing a buffer's file, or nil. Unnamed buffers
---- resolve to nil on purpose — a scratch buffer belongs to no repo, so falling
---- back to the cwd would render another repo's comments in it.
----@param buf integer
----@return string?
-local function buf_root(buf)
-  local name = vim.api.nvim_buf_get_name(buf)
-  if name == "" then
-    return nil
-  end
-  return M.repo_root(name)
-end
-
---- Normalized repo root containing the cwd, or nil. The toggle/statusline
---- anchor: mirrors how triage scopes review mode, so "this tab's repo" means
---- the same thing to both plugins.
----@return string?
-local function cwd_root()
-  return M.repo_root(vim.fn.getcwd())
-end
-
---- Is `path` equal to or under `root` (both normalized)?
----@param path string
----@param root string
----@return boolean
-local function under(path, root)
-  return path == root or path:sub(1, #root + 1) == root .. "/"
-end
-
---- A buffer's path relative to `root`, or nil if it's not under it.
----@param buf integer
----@param root string
----@return string?
-local function rel_of(buf, root)
-  local name = vim.api.nvim_buf_get_name(buf)
-  if name == "" then
-    return nil
-  end
-  name = vim.fs.normalize(name)
-  if name ~= root and name:sub(1, #root + 1) ~= root .. "/" then
-    return nil
-  end
-  return name:sub(#root + 2)
 end
 
 -- ---------------------------------------------------------------------------
@@ -471,110 +299,6 @@ end
 
 -- ---------------------------------------------------------------------------
 
---- First non-empty line of jj's bookmark listing, or "" when there is none.
----@param stdout string
----@return string
-function M.first_bookmark(stdout)
-  for line in (stdout or ""):gmatch("[^\n]+") do
-    line = vim.trim(line)
-    if line ~= "" then
-      return line
-    end
-  end
-  return ""
-end
-
---- The branch name GitHub knows this checkout by. Under git that is the
---- checked-out branch. In a colocated jj repo HEAD is always detached, so ask jj
---- for the nearest bookmark at or below `@` instead: the working copy is usually
---- an empty, unbookmarked change on top of the pushed one. Runs with
---- --ignore-working-copy so a background lookup never snapshots the files.
---- Returns "" when nothing names the checkout. Must run inside a coroutine.
----@param root string
----@return string
-function M.current_branch(root)
-  if vim.uv.fs_stat(root .. "/.jj") then
-    local obj = sh({
-      "jj", "--ignore-working-copy", "--color=never", "--no-pager", "-R", root,
-      "log", "--no-graph", "-r", "heads(::@ & bookmarks())",
-      "-T", 'local_bookmarks.map(|b| b.name()).join("\n") ++ "\n"',
-    })
-    if obj.code ~= 0 then
-      return ""
-    end
-    return M.first_bookmark(obj.stdout)
-  end
-  return vim.trim(sh({ "git", "-C", root, "branch", "--show-current" }).stdout or "")
-end
-
---- The commit a submitted review is anchored to: what the drafts were placed
---- against. Under git that is HEAD. In a jj workspace ask jj instead -- a
---- secondary workspace has no .git, so git cannot answer there at all. The
---- working copy `@` is usually an empty change on top of the pushed one, so an
---- empty `@` resolves to its parent; a non-empty `@` is the content the drafts
---- describe and is returned as-is (GitHub then 422s until it is pushed, which is
---- the intended recovery -- see M.submit). Returns "" when nothing resolves.
---- Must run inside a coroutine.
----@param root string
----@return string
-function M.head_commit(root)
-  if vim.uv.fs_stat(root .. "/.jj") then
-    local obj = sh({
-      "jj", "--ignore-working-copy", "--color=never", "--no-pager", "-R", root,
-      "log", "--no-graph", "-r", "@",
-      "-T", 'if(empty, parents.map(|c| c.commit_id()).join(""), commit_id)',
-    })
-    if obj.code ~= 0 then
-      return ""
-    end
-    return vim.trim(obj.stdout or "")
-  end
-  return vim.trim(sh({ "git", "-C", root, "rev-parse", "HEAD" }).stdout or "")
-end
-
---- The open PR for the branch checked out in `root`. Returns {number} or nil (no
---- PR, or the user dismissed the picker). Prompts once when a branch has several
---- open PRs and remembers the choice.
----@param root string
----@return { number: integer }?
-local function resolve_pr(root)
-  local branch = M.current_branch(root)
-  if branch == "" then
-    return nil
-  end
-  local prs = gh_json(
-    { "pr", "list", "--head", branch, "--state", "open", "--json", "number,title" },
-    root
-  )
-  if not prs or #prs == 0 then
-    return nil
-  end
-
-  local chosen
-  if #prs == 1 then
-    chosen = prs[1]
-  elseif M.pr_choice and M.pr_choice.root == root and M.pr_choice.branch == branch then
-    for _, pr in ipairs(prs) do
-      if pr.number == M.pr_choice.number then
-        chosen = pr
-      end
-    end
-    chosen = chosen or prs[1]
-  else
-    local labels = {}
-    for _, pr in ipairs(prs) do
-      labels[#labels + 1] = ("#%d  %s"):format(pr.number, pr.title)
-    end
-    local idx = pick(labels, { prompt = "Multiple open PRs for this branch:" })
-    if not idx then
-      return nil
-    end
-    chosen = prs[idx]
-    M.pr_choice = { root = root, branch = branch, number = chosen.number }
-  end
-  return { number = chosen.number }
-end
-
 --- Join the branch PR's review threads (GraphQL) back onto the REST comments,
 --- which carry no resolution or thread-grouping fields. Returns, keyed by REST
 --- comment id (== GraphQL databaseId): `resolved` (true for comments in a resolved
@@ -627,40 +351,12 @@ local function review_threads(root, number)
   return resolved, thread_of
 end
 
---- The authenticated GitHub login (cached). Used to find your own comments.
----@param root string
----@return string?
-local function resolve_viewer(root)
-  if M.viewer then
-    return M.viewer
-  end
-  local obj = sh({ "gh", "api", "user", "--jq", ".login" }, root)
-  if obj.code == 0 then
-    M.viewer = vim.trim(obj.stdout)
-  end
-  return M.viewer
-end
-
---- Fill M.names for any of `logins` not yet looked up (one gh call each, but
---- only once per login per session). Runs in a coroutine like the other gh work.
----@param root string
----@param logins table<string, boolean> set of login -> true
-local function resolve_names(root, logins)
-  for login in pairs(logins) do
-    if M.names[login] == nil then
-      -- `.name // ""` yields "" (not null) when the user has no display name.
-      local obj = sh({ "gh", "api", "users/" .. login, "--jq", '.name // ""' }, root)
-      M.names[login] = (obj.code == 0) and vim.trim(obj.stdout) or ""
-    end
-  end
-end
-
 --- Header chunks for a comment author: "Display Name - @login" (the handle in a
 --- quieter hue) when a display name is known, else just "@login".
 ---@param login string
 ---@return table[] virt_text chunks
 local function author_chunks(login)
-  local name = M.names[login]
+  local name = github.names[login]
   if name and name ~= "" then
     return {
       { name, "ReviewCommentAuthor" },
@@ -669,104 +365,6 @@ local function author_chunks(login)
   end
   return { { "@" .. login, "ReviewCommentAuthor" } }
 end
-
---- A scratch window to compose text. Calls on_submit(body, close) on <C-s>.
---- `initial` prefills it (and skips insert mode, e.g. when editing). By default
---- an empty body cancels (closes without submitting); `allow_empty` lets an
---- empty body through instead (the review summary is optional, so <C-s> on an
---- empty compose window still submits).
----
---- Opens as a short split directly below the current window rather than a
---- float: nothing gets covered, and moving between the code and the compose
---- area is ordinary <C-w>j/k — a float needs mouse or <C-w>w gymnastics, and
---- copying context into the comment is a two-window workflow. Splitting the
---- current window (not the top level) keeps the box under the buffer it
---- comments on, and keeps it out of the way of edge-panel managers like edgy.
----@param title string
----@param initial string[]?
----@param on_submit fun(body: string, close: fun())
----@param allow_empty boolean?
-local COMPOSE_HEIGHT = 8
-
---- Run fn with 'splitkeep' forced to "cursor". With splitkeep=screen (set by
---- edge-panel managers such as edgy so the middle windows don't jump when a
---- panel opens) Neovim keeps the TEXT on the same screen rows when a window
---- shrinks or grows, and moves the CURSOR when it would fall off the edge --
---- so opening the compose split under a cursor in the bottom rows drags the
---- cursor up, away from the line being commented on, and it never comes back.
---- "cursor" keeps the cursor line and scrolls the text instead, which is what
---- a box that comments on the cursor line needs.
----@generic T
----@param fn fun(): T
----@return T
-local function with_cursor_splitkeep(fn)
-  local saved = vim.o.splitkeep
-  vim.o.splitkeep = "cursor"
-  local ok, res = pcall(fn)
-  vim.o.splitkeep = saved
-  if not ok then
-    error(res, 0)
-  end
-  return res
-end
-
---- Retitle a compose box. The title is a winbar, a statusline format, so % is escaped.
----@param win integer
----@param title string
-local function set_compose_title(win, title)
-  vim.wo[win].winbar = ("%%#Title# %s %%#Comment# · <C-s> send · q cancel "):format(
-    (title:gsub("%%", "%%%%"))
-  )
-end
-
-local function open_input(title, initial, on_submit, allow_empty)
-  local input = vim.api.nvim_create_buf(false, true)
-  vim.bo[input].filetype = "markdown"
-  -- After the filetype, so it beats any FileType textwidth: GitHub keeps single
-  -- newlines in comments, so a hard wrap would reach the PR as line breaks.
-  -- The window soft-wraps instead (below).
-  vim.bo[input].textwidth = 0
-  vim.bo[input].bufhidden = "wipe"
-  if initial and #initial > 0 then
-    vim.api.nvim_buf_set_lines(input, 0, -1, false, initial)
-  end
-  local win = with_cursor_splitkeep(function()
-    return vim.api.nvim_open_win(input, true, {
-      split = "below",
-      win = 0,
-      height = COMPOSE_HEIGHT,
-    })
-  end)
-  set_compose_title(win, title)
-  vim.wo[win].number = false
-  vim.wo[win].relativenumber = false
-  vim.wo[win].signcolumn = "no"
-  vim.wo[win].wrap = true
-  vim.wo[win].linebreak = true
-
-  local function close()
-    if vim.api.nvim_win_is_valid(win) then
-      with_cursor_splitkeep(function()
-        vim.api.nvim_win_close(win, true)
-      end)
-    end
-  end
-  local function submit()
-    local body = vim.trim(table.concat(vim.api.nvim_buf_get_lines(input, 0, -1, false), "\n"))
-    if body == "" and not allow_empty then
-      close()
-      return
-    end
-    on_submit(body, close)
-  end
-  vim.keymap.set({ "n", "i" }, "<C-s>", submit, { buffer = input, desc = "Send" })
-  vim.keymap.set("n", "q", close, { buffer = input, desc = "Cancel" })
-  if not (initial and #initial > 0) then
-    vim.cmd("startinsert")
-  end
-  return win, close
-end
-M.open_input = open_input -- exposed for the test suite
 
 -- Column width to soft-wrap inline comment bodies to. virt_lines don't wrap on
 -- their own, so long lines (e.g. a bare URL) would run off the right edge.
@@ -1119,13 +717,13 @@ local function fetch_render(root)
     local logins = {}
     for _, list in pairs(M.by_path[root] or {}) do
       for _, c in ipairs(list) do
-        if c.user and c.user.login and M.names[c.user.login] == nil then
+        if c.user and c.user.login and github.names[c.user.login] == nil then
           logins[c.user.login] = true
         end
       end
     end
     if next(logins) then
-      resolve_names(root, logins)
+      github.resolve_names(root, logins)
       render_all()
     end
   end)
@@ -1631,7 +1229,7 @@ function M.submit()
     end
     local win = open_input(title(), nil, function(body, close)
       run(function()
-        -- Anchor to the local checkout (M.head_commit), never the PR's remote
+        -- Anchor to the local checkout (checkout.head_commit), never the PR's remote
         -- head: the drafts were placed against the working copy, so if the
         -- remote branch has moved on since the last fetch, the remote head
         -- points at content these line numbers no longer describe. The commit
@@ -1639,7 +1237,7 @@ function M.submit()
         -- isn't, the submit 422s and the drafts survive for M.yank_drafts.
         -- That's the intended recovery — submitting against a commit we didn't
         -- review would be the worse outcome.
-        local head = M.head_commit(root)
+        local head = checkout.head_commit(root)
         if head == "" then
           vim.notify("review: submit failed: cannot resolve the local commit", vim.log.levels.ERROR)
           return
@@ -2011,7 +1609,7 @@ function M.overview()
     if e.kind == "draft" then
       who = "@you (draft, unsent)"
     else
-      local name = e.login and M.names[e.login]
+      local name = e.login and github.names[e.login]
       local handle = "@" .. (e.login or "?")
       who = (name and name ~= "") and (name .. " - " .. handle) or handle
     end

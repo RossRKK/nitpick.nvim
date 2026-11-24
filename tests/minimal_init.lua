@@ -1,7 +1,7 @@
 -- Runtime for the headless test suite: this plugin plus plenary (busted harness
 -- + luassert). The flake's shell and check set PLENARY_DIR; without them,
 -- plenary comes from the Neovim config's lazy install. No neo-tree: the specs
--- cover the pure logic in nitpick/init.lua and fake whatever plugin objects it
+-- cover the pure logic in lua/nitpick/ and fake whatever plugin objects it
 -- touches.
 
 local root = vim.fn.fnamemodify(vim.fn.expand("<sfile>:p"), ":h:h")

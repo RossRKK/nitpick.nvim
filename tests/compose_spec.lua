@@ -4,7 +4,7 @@
 -- would bring it back to the line being commented on.
 
 local assert = require("luassert")
-local nitpick = require("nitpick")
+local compose = require("nitpick.compose")
 
 describe("open_input", function()
   local saved_splitkeep, saved_scrolloff
@@ -34,7 +34,7 @@ describe("open_input", function()
     vim.api.nvim_win_set_cursor(code_win, { target, 0 })
     assert.equal(target, vim.api.nvim_win_get_cursor(code_win)[1])
 
-    local _, close = nitpick.open_input("t", nil, function() end)
+    local _, close = compose.open_input("t", nil, function() end)
     vim.cmd("stopinsert")
     assert.equal(target, vim.api.nvim_win_get_cursor(code_win)[1])
     -- Jump back to the code window mid-compose: entering a window is when
@@ -62,7 +62,7 @@ describe("open_input", function()
       end,
     })
 
-    local win, close = nitpick.open_input("t", nil, function() end)
+    local win, close = compose.open_input("t", nil, function() end)
     vim.cmd("stopinsert")
     local buf = vim.api.nvim_win_get_buf(win)
     assert.equal("markdown", vim.bo[buf].filetype)

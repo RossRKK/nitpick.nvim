@@ -388,14 +388,14 @@ describe("comments.toggle_comments", function()
 end)
 
 describe("api_error_text", function()
-  local nitpick = require("nitpick")
+  local github = require("nitpick.github")
   it("is the bare message with no errors", function()
-    assert.equals("Not Found", nitpick.api_error_text({ message = "Not Found" }))
+    assert.equals("Not Found", github.api_error_text({ message = "Not Found" }))
   end)
   it("appends string and object errors", function()
     assert.equals(
       "Unprocessable Entity: commit_id is not part of the pull request; body: missing",
-      nitpick.api_error_text({
+      github.api_error_text({
         message = "Unprocessable Entity",
         errors = { "commit_id is not part of the pull request", { field = "body", code = "missing" } },
       })
