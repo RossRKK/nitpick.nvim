@@ -55,6 +55,7 @@
                             },
                             "body": "Actually, should we not at least have a test with symlinked ssh configs? Should we also not have a recursive depth guard? Is this impossible?\r\n\r\nWould really like to not introduce an infinite recursion on _parsing ssh configs_, of all things.",
                             "createdAt": "2026-11-21T17:39:20Z",
+                            "viewerDidAuthor": false,
                             "viewerCanUpdate": false
                         },
                         {
@@ -65,6 +66,7 @@
                             },
                             "body": "Seems symlinked configs are fine, the man page says \"Files without absolute paths are assumed to be in ~/.ssh if included in a user configuration file\". (Also added a test for this)\r\n\r\nAnyway, seems the failed tests have nothing to do with my changes.",
                             "createdAt": "2026-11-22T03:07:30Z",
+                            "viewerDidAuthor": false,
                             "viewerCanUpdate": false
                         },
                         {
@@ -75,6 +77,7 @@
                             },
                             "body": "followup: https://github.com/neovim/neovim/pull/42943",
                             "createdAt": "2026-11-22T12:34:22Z",
+                            "viewerDidAuthor": false,
                             "viewerCanUpdate": false
                         }
                     ]
@@ -153,6 +156,7 @@
                                         "body": "nit: can drop this, `t.tmpname` paths are cleaned up by the test runner automatically",
                                         "createdAt": "2026-11-21T11:14:38Z",
                                         "diffHunk": "@@ -77,6 +77,43 @@ describe('parse_ssh_config()', function()\n     )\n   end)\n \n+  it('parses Include directives', function()\n+    local home = vim.fs.abspath(t.tmpname(false))\n+    n.mkdir_p(home .. '/.ssh')\n+    t.finally(function()\n+      n.rmdir(home)",
+                                        "viewerDidAuthor": false,
                                         "viewerCanUpdate": false
                                     }
                                 ]
@@ -176,6 +180,7 @@
                                         "body": "i just noticed we are hardcoding `~/.ssh` here, that's a bit sus. now that you added another case above, let's declare sth like `ssh_dir` near top of file.",
                                         "createdAt": "2026-11-21T11:15:45Z",
                                         "diffHunk": "@@ -276,8 +294,7 @@ function M.parse_config(filename)\n end\n \n ---@param filename? string Path to the SSH config file. Defaults to `~/.ssh/config`.\n----@return string[] The hostnames configured in the SSH config file. Note: This does not process\n----                 `Include` directives.\n+---@return string[] The hostnames configured in the SSH config file.\n function M.get_hosts(filename)\n   filename = filename or vim.fs.normalize('~/.ssh/config')",
+                                        "viewerDidAuthor": false,
                                         "viewerCanUpdate": false
                                     }
                                 ]
@@ -199,6 +204,7 @@
                                         "body": "https://web.archive.org/web/20190925004614/https://bugzilla.mindrot.org/show_bug.cgi?id=2050 RIP",
                                         "createdAt": "2026-11-21T16:13:41Z",
                                         "diffHunk": "@@ -10,6 +9,7 @@ local M = {}\n \n local whitespace_pattern = '%s'\n local line_break_pattern = '[\\r\\n]'\n+local ssh_dir = '~/.ssh'",
+                                        "viewerDidAuthor": false,
                                         "viewerCanUpdate": false
                                     }
                                 ]
@@ -222,6 +228,7 @@
                                         "body": "unreleased feature so not needed in news\n```suggestion\n```",
                                         "createdAt": "2026-11-22T11:27:50Z",
                                         "diffHunk": "@@ -327,6 +327,7 @@ EDITOR\n \u2022 |ZR| restarts Nvim (|:restart|).\n \u2022 |:connect| supports `ssh://` URIs. |remote-ssh|\n \u2022 |:connect| without arguments shows a menu of known servers and ssh hosts.\n+\u2022 |:connect| menu includes ssh hosts defined by `Include` directives.",
+                                        "viewerDidAuthor": false,
                                         "viewerCanUpdate": false
                                     }
                                 ]

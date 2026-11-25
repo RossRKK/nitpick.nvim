@@ -69,14 +69,20 @@ describe("timeline.parse", function()
     assert.is_nil(reviews[1].comments[1].kind, "a summary isn't edited as a comment")
   end)
 
-  it("marks a comment yours to edit only when GitHub lets you", function()
+  it("marks a comment yours to edit only when you wrote it and GitHub lets you", function()
     local p = recorded()
-    p.comments.nodes[1].viewerCanUpdate = true
+    -- A maintainer may update anyone's comment; only their own is theirs to edit.
+    for _, node in ipairs(p.comments.nodes) do
+      node.viewerCanUpdate = true
+    end
+    p.comments.nodes[1].viewerDidAuthor = true
+    p.comments.nodes[2].viewerDidAuthor = true
+    p.comments.nodes[2].viewerCanUpdate = false
     local mine = vim.tbl_filter(function(t)
       return t.comments[1].can_edit
     end, timeline.parse(p, pr.epoch))
     assert.equals(1, #mine)
-    assert.equals("barrettruth", mine[1].comments[1].author.login)
+    assert.equals(p.comments.nodes[1].id, mine[1].comments[1].id)
   end)
 end)
 

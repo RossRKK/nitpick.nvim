@@ -5,11 +5,11 @@ local M = {}
 
 -- The PR query's fields this module reads.
 M.FIELDS = [[
-      comments(last:100){ nodes{ id author{ __typename login } body createdAt viewerCanUpdate } }
+      comments(last:100){ nodes{ id author{ __typename login } body createdAt viewerDidAuthor viewerCanUpdate } }
       reviews(last:100){ nodes{ id author{ __typename login } body state submittedAt } }
       reviewThreads(last:100){ nodes{
         id isResolved isOutdated path line originalLine
-        comments(first:100){ nodes{ id author{ __typename login } body createdAt diffHunk viewerCanUpdate } }
+        comments(first:100){ nodes{ id author{ __typename login } body createdAt diffHunk viewerDidAuthor viewerCanUpdate } }
       } }
 ]]
 
@@ -61,7 +61,7 @@ function M.parse(p, epoch)
       author = { login = author.login, is_bot = author.__typename == "Bot" },
       body = ((node.body ~= vim.NIL and node.body) or ""):gsub("\r", ""),
       created_at = epoch(node.createdAt or node.submittedAt),
-      can_edit = node.viewerCanUpdate == true,
+      can_edit = node.viewerDidAuthor == true and node.viewerCanUpdate == true,
     }
   end
 
